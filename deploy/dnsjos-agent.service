@@ -1,0 +1,16 @@
+[Unit]
+Description=DnsJos node agent (manages dnsdist)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Root: writes /etc/dnsdist and restarts dnsdist (SPEC §9).
+ExecStart=/usr/local/bin/dnsjos-agent run
+Restart=always
+RestartSec=5
+StateDirectory=dnsjos
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target

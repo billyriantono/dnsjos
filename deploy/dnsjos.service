@@ -1,0 +1,31 @@
+[Unit]
+Description=DnsJos control panel
+Documentation=https://github.com/billyriantono/dnsjos
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dnsjos
+Group=dnsjos
+EnvironmentFile=/etc/dnsjos/dnsjos.env
+ExecStart=/usr/local/bin/dnsjos serve
+Restart=on-failure
+RestartSec=3
+StateDirectory=dnsjos
+StateDirectoryMode=0750
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+ReadWritePaths=/var/lib/dnsjos
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,9 @@
+# TLS reverse proxy in front of the panel (listening on 127.0.0.1:8080).
+# The panel trusts X-Forwarded-For only from loopback, so keep Caddy on the same host.
+dnsjos.example.com {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080 {
+		# Blocklist CDB downloads are large; don't buffer them.
+		flush_interval -1
+	}
+}

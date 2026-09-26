@@ -1,0 +1,78 @@
+# Synthetic dnsdist_ootb config for tests (documentation addresses only).
+services:
+  dns:
+    ip4: 0.0.0.0
+    ip6: '[::]'
+    port: 53
+    acl: "10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 198.51.100.0/29, 198.51.100.8/29, 198.51.100.16/29, 198.51.100.24/29, 198.51.100.32/29, 198.51.100.40/29, 2001:db8:1::/48, ::1/128, fc00::/7, fe80::/10, 198.51.100.48/29, 198.51.100.56/29, 198.51.100.64/29, 198.51.100.72/29, 198.51.100.80/29, 198.51.100.88/29, 198.51.100.96/29, 198.51.100.104/29, 198.51.100.112/29, 198.51.100.120/29, 198.51.100.128/29, 198.51.100.136/29, 198.51.100.144/29, 198.51.100.152/29, 198.51.100.160/29, 2001:db8:2::/48, 2001:db8:3::/48, 2001:db8:4::/48, 2001:db8:5::/48, 2001:db8:6::/48, 2001:db8:7::/48, 2001:db8:8::/48"
+
+  doh:
+    ip4: 0.0.0.0
+    ip6: '[::]'
+    cert: /etc/dnsdist/tls/cert.pem
+    key: <redacted>
+  dot:
+    ip4: 0.0.0.0
+    ip6: '[::]'
+    cert: /etc/dnsdist/tls/cert.pem
+    key: <redacted>
+
+rules:
+  # Block domains with subdomain matching (default behavior)
+  - name: trustpositif
+    logging:
+      ip: 203.0.113.10
+      port: 6000
+      protocol: dnstap
+      streamid: dns3
+    qnamecdb:
+      filename: /etc/dnsdist/db/blacklist.db
+      reload: 3600
+      match_subdomains: true  # This is the default, can be omitted
+    policy: blockpage
+    blockpage:
+      - 203.0.113.11
+      - "2001:db8::10"
+    blockpage_soa: "blocked. nobody.blocked. 1 3600 1200 604800 10800"
+    blockpage_txt: "BLOCKED. UU No 19, pasal 40 (2a dan 2b). Permen Kominfo No 5 2020"
+    blockpage_ns: "blocked.blocking"
+
+  - name: ip-blacklist
+    response_ipcdb:
+      filename: /etc/dnsdist/db/blacklist.db
+      reload: 3600
+    policy: blockpage
+    blockpage:
+      - 203.0.113.11
+      - "2001:db8::10"
+    blockpage_soa: "blocked. nobody.blocked. 1 3600 1200 604800 10800"
+    blockpage_txt: "BLOCKED. UU No 19, pasal 40 (2a dan 2b). Permen Kominfo No 5 2020"
+    blockpage_ns: "blocked.blocking"
+
+  - upstreams:
+      loadbalancing: whashed
+      dns:
+        - ip: 1.0.0.1
+          weight: 10
+        - ip: 203.0.113.12
+          weight: 40
+        - ip: 203.0.113.13
+          weight: 30
+        - ip: 1.1.1.1
+          weight: 10
+        - ip: 8.8.8.8
+          weight: 5
+        - ip: 8.8.4.4
+          weight: 5
+admin:
+  web:
+    ip4: 0.0.0.0
+    port: 8083
+    acl: "127.0.0.1/8, 198.51.100.16/29, 198.51.100.8/29, 198.51.100.24/29, 198.51.100.32/29"
+    apikey: <redacted>
+    password: <redacted>
+  console:
+    ip4: 0.0.0.0
+    port: 5199
+    acl: 127.0.0.1/8
+    key: <redacted>

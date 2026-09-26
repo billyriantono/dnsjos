@@ -1,0 +1,205 @@
+#!/bin/sh
+# DnsJos node installer (SPEC §13), served by the panel at /install.sh.
+#   curl -fsSL {{.PanelURL}}/install.sh | sudo sh -s -- --token TOKEN [--panel URL] [--adopt] [--no-start]
+# Idempotent: safe to re-run. Supports Debian 12/13 and Ubuntu 22.04/24.04 on amd64/arm64.
+set -eu
+
+PANEL_URL='{{.PanelURL}}'
+TOKEN=''
+ADOPT=0
+NO_START=0
+DNSDIST_SERIES='20' # dnsdist 2.0.x from repo.powerdns.com
+AGENT_BIN=/usr/local/bin/dnsjos-agent
+AGENT_CONF=/etc/dnsjos/agent.json
+STATE_DIR=/var/lib/dnsjos
+UNIT=/etc/systemd/system/dnsjos-agent.service
+
+say() { printf '==> %s\n' "$*"; }
+die() { printf 'dnsjos-install: error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<EOF
+usage: install.sh --token TOKEN [--panel URL] [--adopt] [--no-start]
+  --token TOKEN  enrollment token from the panel (Nodes -> Add node)
+  --panel URL    panel URL (default: $PANEL_URL)
+  --adopt        take over a live dnsdist server: keep its dnsdist package, secrets,
+                 listeners and port 53 setup (no repo, no install/upgrade, no resolved changes)
+  --no-start     install the agent service but do not start it (review with 'dnsjos-agent plan')
+EOF
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--token) [ $# -ge 2 ] || die "--token needs a value"; TOKEN=$2; shift 2 ;;
+		--token=*) TOKEN=${1#--token=}; shift ;;
+		--panel) [ $# -ge 2 ] || die "--panel needs a value"; PANEL_URL=$2; shift 2 ;;
+		--panel=*) PANEL_URL=${1#--panel=}; shift ;;
+		--adopt) ADOPT=1; shift ;;
+		--no-start) NO_START=1; shift ;;
+		-h|--help) usage; exit 0 ;;
+		*) usage >&2; die "unknown argument: $1" ;;
+	esac
+done
+PANEL_URL=${PANEL_URL%/}
+
+[ "$(id -u)" -eq 0 ] || die "must run as root (pipe into 'sudo sh')"
+[ -n "$TOKEN" ] || [ -s "$AGENT_CONF" ] || { usage >&2; die "--token is required"; }
+case "$PANEL_URL" in http://*|https://*) ;; *) die "--panel must be an http(s) URL" ;; esac
+
+# ── 1. OS / architecture ────────────────────────────────────────────────────
+[ -r /etc/os-release ] || die "cannot read /etc/os-release"
+# shellcheck disable=SC1091
+. /etc/os-release
+OS_ID=${ID:-}
+OS_VER=${VERSION_ID:-}
+CODENAME=${VERSION_CODENAME:-}
+case "$OS_ID:$OS_VER" in
+	debian:12|debian:13|ubuntu:22.04|ubuntu:24.04) ;;
+	*) die "unsupported OS ${PRETTY_NAME:-$OS_ID $OS_VER} (need Debian 12/13 or Ubuntu 22.04/24.04)" ;;
+esac
+[ -n "$CODENAME" ] || die "VERSION_CODENAME missing from /etc/os-release"
+
+ARCH=$(dpkg --print-architecture 2>/dev/null || uname -m)
+case "$ARCH" in
+	amd64|x86_64) ARCH=amd64 ;;
+	arm64|aarch64) ARCH=arm64 ;;
+	*) die "unsupported architecture $ARCH (need amd64 or arm64)" ;;
+esac
+command -v systemctl >/dev/null 2>&1 || die "systemd is required"
+say "installing DnsJos node on $OS_ID $OS_VER ($ARCH), panel $PANEL_URL"
+
+export DEBIAN_FRONTEND=noninteractive
+APT_OPTS='-y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold'
+
+need_pkgs=''
+command -v curl >/dev/null 2>&1 || need_pkgs="$need_pkgs curl"
+command -v sha256sum >/dev/null 2>&1 || need_pkgs="$need_pkgs coreutils"
+[ -f /etc/ssl/certs/ca-certificates.crt ] || need_pkgs="$need_pkgs ca-certificates"
+command -v gpg >/dev/null 2>&1 || need_pkgs="$need_pkgs gnupg"
+if [ -n "$need_pkgs" ]; then
+	say "installing prerequisites:$need_pkgs"
+	apt-get update -q
+	# shellcheck disable=SC2086
+	apt-get install $APT_OPTS $need_pkgs
+fi
+
+mkdir -p "$STATE_DIR"
+chmod 0711 "$STATE_DIR" # dnsdist reads the CDB below it; secrets stay 0600
+
+# ── 2. back up an existing /etc/dnsdist before anything can touch it ────────
+if [ -d /etc/dnsdist ] && [ -n "$(ls -A /etc/dnsdist 2>/dev/null)" ]; then
+	BACKUP="$STATE_DIR/pre-install-$(date +%Y%m%d-%H%M%S)"
+	mkdir -p "$BACKUP"
+	cp -a /etc/dnsdist/. "$BACKUP/"
+	say "backed up /etc/dnsdist to $BACKUP"
+fi
+
+# ── 3. dnsdist 2.0 from repo.powerdns.com, pinned ───────────────────────────
+# An existing dnsdist is never upgraded implicitly: adopted servers keep their version.
+if [ "$ADOPT" = 1 ]; then
+	command -v dnsdist >/dev/null 2>&1 || die "--adopt: dnsdist is not installed"
+	[ -s /etc/dnsdist/dnsdist.yml ] || die "--adopt: /etc/dnsdist/dnsdist.yml not found"
+	say "adopting the running dnsdist: $(dnsdist --version 2>/dev/null | head -n 1)"
+elif command -v dnsdist >/dev/null 2>&1; then
+	say "dnsdist already installed, leaving it as is: $(dnsdist --version 2>/dev/null | head -n 1)"
+else
+KEYRING=/etc/apt/keyrings/dnsdist-$DNSDIST_SERIES-pub.asc
+install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://repo.powerdns.com/FD380FBB-pub.asc -o "$KEYRING.tmp"
+mv "$KEYRING.tmp" "$KEYRING"
+chmod 0644 "$KEYRING"
+echo "deb [signed-by=$KEYRING] https://repo.powerdns.com/$OS_ID $CODENAME-dnsdist-$DNSDIST_SERIES main" \
+	>/etc/apt/sources.list.d/pdns-dnsdist.list
+cat >/etc/apt/preferences.d/dnsdist-$DNSDIST_SERIES <<EOF
+Package: dnsdist*
+Pin: origin repo.powerdns.com
+Pin-Priority: 600
+EOF
+say "installing dnsdist"
+apt-get update -q
+# shellcheck disable=SC2086
+apt-get install $APT_OPTS dnsdist
+command -v dnsdist >/dev/null 2>&1 || die "dnsdist was not installed"
+say "$(dnsdist --version 2>/dev/null | head -n 1)"
+fi
+
+# Big UDP socket buffers (setUDPSocketBufferSizes 16 MB needs the kernel max raised).
+cat >/etc/sysctl.d/90-dnsjos.conf <<EOF
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+EOF
+sysctl -q -p /etc/sysctl.d/90-dnsjos.conf >/dev/null 2>&1 || true
+
+# ── 4. free port 53 from the systemd-resolved stub listener ─────────────────
+if [ "$ADOPT" = 0 ] && systemctl is-active --quiet systemd-resolved 2>/dev/null; then
+	if ! grep -rqs '^DNSStubListener=no' /etc/systemd/resolved.conf /etc/systemd/resolved.conf.d; then
+		say "disabling the systemd-resolved stub listener on :53"
+		mkdir -p /etc/systemd/resolved.conf.d
+		printf '[Resolve]\nDNSStubListener=no\n' >/etc/systemd/resolved.conf.d/dnsjos.conf
+		systemctl restart systemd-resolved
+	fi
+	# The stub resolv.conf points at 127.0.0.53, which no longer answers.
+	if [ "$(readlink /etc/resolv.conf 2>/dev/null || true)" != /run/systemd/resolve/resolv.conf ] &&
+		grep -qs '^nameserver 127\.0\.0\.53' /etc/resolv.conf; then
+		ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+	fi
+fi
+
+# ── 5. agent binary (sha256-verified) ───────────────────────────────────────
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT INT TERM
+say "downloading dnsjos-agent (linux/$ARCH)"
+curl -fsSL "$PANEL_URL/dl/agent/linux/$ARCH" -o "$TMP/dnsjos-agent" ||
+	die "agent download failed: $PANEL_URL/dl/agent/linux/$ARCH"
+WANT=$(curl -fsSL "$PANEL_URL/dl/agent/linux/$ARCH.sha256" | awk '{print $1; exit}')
+GOT=$(sha256sum "$TMP/dnsjos-agent" | awk '{print $1}')
+if [ -z "$WANT" ] || [ "$WANT" != "$GOT" ]; then
+	die "agent checksum mismatch (want '$WANT', got '$GOT')"
+fi
+install -m 0755 "$TMP/dnsjos-agent" "$AGENT_BIN.new"
+mv -f "$AGENT_BIN.new" "$AGENT_BIN"
+
+# ── 6. enroll (skipped when already enrolled; tokens are single-use) ────────
+if [ -s "$AGENT_CONF" ]; then
+	say "already enrolled ($AGENT_CONF exists); delete it and re-run with a new token to re-enroll"
+else
+	say "enrolling with the panel"
+	if [ "$ADOPT" = 1 ]; then
+		"$AGENT_BIN" enroll --panel "$PANEL_URL" --token "$TOKEN" --adopt || die "enrollment failed"
+	else
+		"$AGENT_BIN" enroll --panel "$PANEL_URL" --token "$TOKEN" || die "enrollment failed"
+	fi
+	[ -s "$AGENT_CONF" ] || die "enrollment did not write $AGENT_CONF"
+fi
+
+# ── 7. systemd service ──────────────────────────────────────────────────────
+cat >"$UNIT" <<'EOF'
+[Unit]
+Description=DnsJos node agent (manages dnsdist)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dnsjos-agent run
+Restart=always
+RestartSec=5
+StateDirectory=dnsjos
+StateDirectoryMode=0711
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload
+if [ "$NO_START" = 1 ]; then
+	say "agent installed but NOT started. Review what it would change, then start it:"
+	say "  $AGENT_BIN plan"
+	say "  systemctl enable --now dnsjos-agent"
+	exit 0
+fi
+systemctl enable dnsjos-agent >/dev/null 2>&1
+systemctl restart dnsjos-agent
+
+NODE_ID=$(sed -n 's/.*"node_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$AGENT_CONF" | head -n 1)
+say "done: node $(hostname) (id ${NODE_ID:-unknown}) is managed by $PANEL_URL"
+say "it appears as online in the panel within a few seconds; logs: journalctl -u dnsjos-agent -f"

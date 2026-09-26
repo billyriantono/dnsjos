@@ -1,0 +1,8 @@
+#!/bin/sh
+# stdin: <local ref> <local sha> <remote ref> <remote sha>
+z=0000000000000000000000000000000000000000
+while read -r _ lsha _ rsha; do
+	[ "$lsha" = "$z" ] && continue
+	if [ "$rsha" = "$z" ]; then range=$lsha; else range=$rsha..$lsha; fi
+	"$(git rev-parse --show-toplevel)/scripts/check-sensitive.sh" range "$range" || exit 1
+done

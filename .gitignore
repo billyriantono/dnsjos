@@ -1,0 +1,29 @@
+# build output
+/bin/
+/dist/
+*.test
+coverage.out
+
+# embedded build artifacts (placeholders are committed, real builds are not)
+/internal/panel/install/bin/dnsjos-agent-*
+!/internal/panel/install/bin/.gitkeep
+
+# web
+/web/node_modules/
+/web/dist/
+/web/.vite/
+
+# local env / data
+.env
+.env.*
+!.env.example
+/data/
+*.log
+.DS_Store
+
+# SPA copied into the Go embed dir by `make panel` (build output, never committed)
+/webdist/dist/
+
+# generated test artifacts
+/test/ui/screenshots/
+/test/**/output/
