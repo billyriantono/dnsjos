@@ -292,6 +292,10 @@ type BlocklistLookup struct {
 	Name    string `json:"name"`
 	Blocked bool   `json:"blocked"`
 	Match   string `json:"match"` // the entry that matched (name itself or a parent)
+	// Allowed: an active allowlist entry covers the name/IP (blocked may still be true when
+	// the entry is newer than the current build; nodes enforce the allowlist anyway).
+	Allowed    bool        `json:"allowed"`
+	AllowEntry *AllowEntry `json:"allow_entry"`
 }
 
 type BlockedReport struct {
@@ -350,7 +354,8 @@ type Settings struct {
 	AnalyticsRetentionDays        int    `json:"analytics_retention_days"`
 	AgentPollIntervalS            int    `json:"agent_poll_interval_s"`
 	AgentHeartbeatIntervalS       int    `json:"agent_heartbeat_interval_s"`
-	PublicURL                     string `json:"public_url"` // empty = DNSJOS_PUBLIC_URL
+	PublicURL                     string `json:"public_url"`                  // empty = DNSJOS_PUBLIC_URL
+	BlocklistDownloadSegments     int    `json:"blocklist_download_segments"` // 1..16, 1 = single stream
 }
 
 type Overview struct {

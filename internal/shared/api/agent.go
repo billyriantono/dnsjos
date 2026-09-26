@@ -44,6 +44,8 @@ type AgentConfig struct {
 	Blocklist          BlocklistRef `json:"blocklist"`
 	PollIntervalS      int          `json:"poll_interval_s"`
 	HeartbeatIntervalS int          `json:"heartbeat_interval_s"`
+	// AllowlistVersion is the ETag of GET /agent/v1/allowlist (SPEC §7.5).
+	AllowlistVersion string `json:"allowlist_version"`
 }
 
 type BlocklistRef struct {
@@ -78,6 +80,8 @@ type Heartbeat struct {
 	InventoryAt       *time.Time     `json:"inventory_at"`
 	LastUpgrade       *UpgradeResult `json:"last_upgrade"`
 	UpgradeInProgress bool           `json:"upgrade_in_progress"`
+	// AllowlistVersion is the allowlist the node enforces ("" = none applied yet).
+	AllowlistVersion string `json:"allowlist_version"`
 }
 
 // UpgradeResult is the outcome of the node's most recent upgrade_dnsdist / upgrade_agent.
@@ -144,6 +148,8 @@ type HeartbeatAck struct {
 	ConfigVersion   int       `json:"config_version"`
 	BlocklistSHA256 string    `json:"blocklist_sha256"`
 	Commands        []Command `json:"commands,omitempty"`
+	// AllowlistVersion changes with the active allowlist; the agent re-fetches it then.
+	AllowlistVersion string `json:"allowlist_version"`
 }
 
 const (

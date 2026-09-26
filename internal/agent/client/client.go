@@ -180,3 +180,18 @@ func (c *Client) PostCGK(ctx context.Context, r api.CGKReport) error {
 	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/cgk", r, nil, nil)
 	return err
 }
+
+// Allowlist fetches the active allowlist; version is the applied one ("" = none). nil
+// with nil error means 304 (unchanged).
+func (c *Client) Allowlist(ctx context.Context, version string) (*api.Allowlist, error) {
+	var hdr http.Header
+	if version != "" {
+		hdr = http.Header{"If-None-Match": {`"` + strings.Trim(version, `"`) + `"`}}
+	}
+	var out api.Allowlist
+	code, _, err := c.JSON(ctx, http.MethodGet, "/agent/v1/allowlist", nil, &out, hdr)
+	if err != nil || code == http.StatusNotModified {
+		return nil, err
+	}
+	return &out, nil
+}

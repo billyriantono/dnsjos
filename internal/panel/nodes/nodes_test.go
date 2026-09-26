@@ -18,6 +18,7 @@ import (
 
 	"github.com/billyriantono/dnsjos/internal/panel/app"
 	"github.com/billyriantono/dnsjos/internal/panel/db/dbtest"
+	"github.com/billyriantono/dnsjos/internal/panel/httpx"
 	"github.com/billyriantono/dnsjos/internal/panel/install"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
@@ -185,6 +186,15 @@ func TestEnrollAndConfig(t *testing.T) {
 	if cfg.Version/100000 != 2 || cfg.Blocklist != (api.BlocklistRef{SHA256: "abc", Size: 123, URL: "/agent/v1/blocklist"}) {
 		t.Fatalf("v2 config: %d %+v", cfg.Version, cfg.Blocklist)
 	}
+	// SPEC §7.5: the allowlist version rides on the config, and a change does not alter
+	// the config ETag (agents would re-apply their dnsdist config for nothing).
+	al0 := cfg.AllowlistVersion
+	e.run(`INSERT INTO allowlist (kind, value) VALUES ('domain', 'cdn.example.net')`)
+	e.call(304, "GET", "/agent/v1/config", er.NodeToken, nil, nil, "If-None-Match", fmt.Sprintf(`"%d"`, cfg.Version))
+	e.call(200, "GET", "/agent/v1/config", er.NodeToken, nil, &cfg)
+	if al0 == "" || cfg.AllowlistVersion == "" || cfg.AllowlistVersion == al0 {
+		t.Fatalf("allowlist_version %q → %q", al0, cfg.AllowlistVersion)
+	}
 
 	// clearing overrides gives the plain profile version
 	e.call(200, "PATCH", path, "admin", map[string]any{"overrides": nil}, &n)
@@ -231,7 +241,7 @@ func TestHeartbeat(t *testing.T) {
 	up := []api.BackendStat{{Address: "1.1.1.1:53", State: "up"}, {Address: "8.8.8.8:53", State: "up"}}
 
 	ack := hb(t0, 1000, 0, 0, up, nil)
-	if ack.ConfigVersion != 1 || sum() != 0 { // no baseline yet
+	if ack.ConfigVersion != 1 || sum() != 0 || len(ack.AllowlistVersion) != 16 { // no baseline yet
 		t.Fatalf("first heartbeat: ack %+v, queries %d", ack, sum())
 	}
 	var c api.Command
@@ -598,7 +608,7 @@ func TestPure(t *testing.T) {
 			t.Errorf("nameFromHostname(%q) = %q", in, got)
 		}
 	}
-	if !etagMatch(`W/"5", "7"`, `"7"`) || etagMatch(`"5"`, `"7"`) {
+	if !httpx.ETagMatch(`W/"5", "7"`, `"7"`) || httpx.ETagMatch(`"5"`, `"7"`) {
 		t.Error("etagMatch")
 	}
 }

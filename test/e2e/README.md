@@ -25,7 +25,9 @@ answers; `one.one.one.one` A → `1.1.1.1` rewritten to the blockpage (response-
 blocking, opted in by the test profile); the panel's live heartbeat shows dnsdist running, non-zero queries and blocked
 counters, both backends up and the applied config; the CDB file and heartbeat sha256
 match the build; `cgkReload()` via the agent's console client; dnstap → `POST /blocked` →
-`GET /api/v1/reports/blocked` lists `blocked.example`; a blocked batch posted twice with the same
+`GET /api/v1/reports/blocked` lists `blocked.example`; an allowlist entry for `blocked.example` added via the API makes
+it resolve upstream (NXDOMAIN) within 20 s while `www.pornhub.com` stays blocked, the heartbeat
+reports the applied allowlist version, and deleting the entry blocks it again; a blocked batch posted twice with the same
 `Idempotency-Key` is counted once; a newly published version is
 re-rendered, dnsdist restarted and the new blockpage served; after a few more queries
 (including the NXDOMAIN `nonexistent-e2e.example.invalid`) the analytics dnstap stream →

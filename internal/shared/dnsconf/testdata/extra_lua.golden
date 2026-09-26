@@ -58,8 +58,65 @@ addMaintenanceCallback(function() dbr:apply() end)
 -- Blocklist: names in the CDB (and every name below them) get the blockpage.
 declareMetric("dnsjos-blocked", "counter", "Queries answered with the blockpage")
 local kvs = newCDBKVStore("/var/lib/dnsjos/blocklist/current.cdb", 60)
+
+-- Allowlist (emergency unblock of false positives such as CDN names): names in
+-- ALLOW_DOMAINS_FILE, and every name below them, are never blocked; addresses in
+-- ALLOW_IPS_FILE never trigger the response-IP block. The agent rewrites both files
+-- and calls dnsjosAllowReload() over the console; a missing file is an empty list.
+local ALLOW_DOMAINS_FILE = "/etc/dnsdist/dnsjos/allowlist-domains.txt"
+local ALLOW_IPS_FILE = "/etc/dnsdist/dnsjos/allowlist-ips.txt"
+local function readList(path, fallback, allowEmpty)
+  local f = io.open(path, "r")
+  if not f then return fallback end
+  local t = {}
+  for line in f:lines() do
+    line = line:gsub("#.*", ""):match("^%s*(.-)%s*$")
+    if line ~= "" then t[#t + 1] = line end
+  end
+  f:close()
+  if #t == 0 and not allowEmpty then return fallback end
+  return t
+end
+local allowSMN, allowNMG, allowNames, allowMasks, allowIPs = newSuffixMatchNode(), newNMG(), {}, {}, 0
+
+function dnsjosAllowReload()
+  local smn, nmg, names, masks, nd, ni, bad = newSuffixMatchNode(), newNMG(), {}, {}, 0, 0, 0
+  for _, n in ipairs(readList(ALLOW_DOMAINS_FILE, {}, true)) do
+    local ok, dn = pcall(newDNSName, n)
+    if ok then smn:add(dn); names[n] = dn; nd = nd + 1 else bad = bad + 1 end
+  end
+  for _, m in ipairs(readList(ALLOW_IPS_FILE, {}, true)) do
+    if pcall(function() nmg:addMask(m) end) then masks[m] = true; ni = ni + 1 else bad = bad + 1 end
+  end
+  -- Cached answers must not outlive the change: a newly allowed name may still have a
+  -- blocked answer cached. Queries are checked before the cache, but response-IP
+  -- rewrites are not re-applied to cache hits, so a removed entry flushes too (a
+  -- removed address can hide behind any name: the whole cache).
+  local cache = getPool(""):getCache()
+  if cache then
+    local all = false
+    for m in pairs(allowMasks) do all = all or not masks[m] end
+    if all then
+      cache:expunge(0)
+    else
+      for n, dn in pairs(names) do
+        if not allowNames[n] then cache:expungeByName(dn, DNSQType.ANY, true) end
+      end
+      for n, dn in pairs(allowNames) do
+        if not names[n] then cache:expungeByName(dn, DNSQType.ANY, true) end
+      end
+    end
+  end
+  allowSMN, allowNMG, allowNames, allowMasks, allowIPs = smn, nmg, names, masks, ni
+  return string.format("allowlist: %d domains, %d ips, %d invalid", nd, ni, bad)
+end
+dnsjosAllowReload()
+
+-- A fresh TagRule per rule: dnsdist counts matches on the selector object, so a
+-- shared one would make every rule's hit counter the sum of all of them.
 local function blocked() return TagRule("dnsjos", "blocked") end
 addAction(KeyValueStoreLookupRule(kvs, KeyValueLookupKeySuffix(0, true)), SetTagAction("dnsjos", "blocked"), {name = "dnsjos-blocklist"})
+addAction(AndRule({blocked(), LuaRule(function(dq) return allowSMN:check(dq.qname) end)}), SetTagAction("dnsjos", "allowed"), {name = "dnsjos-allowlist"})
 addAction(blocked(), LuaAction(function() incMetric("dnsjos-blocked") return DNSAction.None, "" end), {name = "dnsjos-blocked-count"})
 local dnstap = newFrameStreamTcpLogger("127.0.0.1:6000")
 addAction(blocked(), DnstapLogAction("dns1.example", dnstap), {name = "dnsjos-blocked-log"})

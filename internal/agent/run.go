@@ -69,8 +69,11 @@ type agent struct {
 	lastUp     *api.UpgradeResult
 	upgrading  bool
 	marker     *agentMarker // agent upgrade awaiting its first successful heartbeat
+	allowWant  string       // allowlist version announced by the panel
+	allowHave  string       // allowlist version enforced by dnsdist
+	allowOld   bool         // the panel has no allowlist endpoint
 
-	pollNow, forceNow, blNow, cgkNow, hbNow, invNow, anNow chan struct{}
+	pollNow, forceNow, blNow, cgkNow, hbNow, invNow, anNow, alNow chan struct{}
 }
 
 // Run runs the agent until ctx is cancelled.
@@ -88,7 +91,7 @@ func Run(ctx context.Context, o Options) error {
 	o.Log.Info("agent starting", "version", o.Version, "panel", a.cl.BaseURL, "root", o.Root, "no_systemd", o.NoSystemd)
 
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.inventoryLoop} {
+	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.inventoryLoop, a.allowlistLoop} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
@@ -126,6 +129,7 @@ func newAgent(ctx context.Context, o Options) (*agent, error) {
 		os: osName(), run: execRunner, inv: inventory{Available: []string{}},
 		pollNow: make(chan struct{}, 1), forceNow: make(chan struct{}, 1), blNow: make(chan struct{}, 1),
 		cgkNow: make(chan struct{}, 1), hbNow: make(chan struct{}, 1), invNow: make(chan struct{}, 1), anNow: make(chan struct{}, 1),
+		alNow: make(chan struct{}, 1),
 	}
 	a.dnsdistVer = dnsdistVersion(ctx, a.run)
 	a.host, _ = os.Hostname()
@@ -206,6 +210,7 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	if cfg.Blocklist.SHA256 != "" {
 		a.wantSHA = cfg.Blocklist.SHA256
 	}
+	a.allowWant = cmp.Or(cfg.AllowlistVersion, a.allowWant)
 	a.mu.Unlock()
 	poke(a.blNow)
 
@@ -213,6 +218,7 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	a.opMu.Lock()
 	changed, err := a.app.Apply(ctx, cfg.Spec, a.runtime(), force)
 	a.opMu.Unlock()
+	poke(a.alNow) // after the apply: dnsdist now runs the blocking.lua that can reload
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -249,7 +255,7 @@ func (a *agent) ensureCDB(ctx context.Context, cfg *api.AgentConfig) {
 		return
 	}
 	if cfg.Blocklist.SHA256 != "" {
-		if _, err := a.bl.Sync(ctx, cfg.Blocklist.SHA256); err != nil {
+		if _, err := a.syncCDB(ctx, cfg.Blocklist.SHA256); err != nil {
 			a.o.Log.Warn("blocklist download before apply failed", "err", err)
 		}
 	}
@@ -259,10 +265,12 @@ func (a *agent) ensureCDB(ctx context.Context, cfg *api.AgentConfig) {
 // seedCDB copies the old /etc/dnsdist/db/blacklist.db when no CDB is installed; true
 // when a CDB is installed afterwards.
 func (a *agent) seedCDB() bool {
+	start := time.Now()
 	ok, err := a.bl.Seed(a.o.path(OOTBCDB))
 	switch {
 	case ok:
-		a.o.Log.Info("blocklist seeded from the adopted server", "src", a.o.path(OOTBCDB), "sha256", a.bl.Local())
+		a.o.Log.Info("blocklist installed", "from", "adopted server", "src", a.o.path(OOTBCDB), "sha256", a.bl.Local(),
+			"duration_ms", time.Since(start).Milliseconds())
 	case err != nil && !os.IsNotExist(err):
 		a.o.Log.Warn("seeding the blocklist failed", "err", err)
 	}
@@ -274,7 +282,7 @@ func (a *agent) blocklistLoop(ctx context.Context) {
 		a.mu.Lock()
 		want := a.wantSHA
 		a.mu.Unlock()
-		changed, err := a.bl.Sync(ctx, want)
+		_, err := a.syncCDB(ctx, want)
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		if err != nil {
@@ -285,10 +293,18 @@ func (a *agent) blocklistLoop(ctx context.Context) {
 			return
 		}
 		a.blErr = ""
-		if changed {
-			a.o.Log.Info("blocklist installed", "sha256", want)
-		}
 	})
+}
+
+// syncCDB installs the panel's CDB want unless it is installed; every install is
+// logged (the panel may serve a newer build than want, so the sha is the installed one).
+func (a *agent) syncCDB(ctx context.Context, want string) (bool, error) {
+	start := time.Now()
+	changed, err := a.bl.Sync(ctx, want)
+	if changed {
+		a.o.Log.Info("blocklist installed", "sha256", a.bl.Local(), "duration_ms", time.Since(start).Milliseconds())
+	}
+	return changed, err
 }
 
 // ── heartbeat + commands ────────────────────────────────────────────────────
@@ -339,6 +355,7 @@ func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
 	hb.AckedCommands = slices.Clone(a.acks)
 	hb.DnsdistCandidate, hb.DnsdistAvailable, hb.DnsdistRepoSeries = a.inv.Candidate, slices.Clone(a.inv.Available), a.inv.Series
 	hb.InventoryAt, hb.LastUpgrade, hb.UpgradeInProgress = a.inv.At, a.lastUp, a.upgrading
+	hb.AllowlistVersion = a.allowHave
 	a.mu.Unlock()
 	return hb
 }
@@ -369,6 +386,7 @@ func (a *agent) heartbeat(ctx context.Context) {
 	if ack.BlocklistSHA256 != "" && ack.BlocklistSHA256 != hb.BlocklistSHA256 {
 		poke(a.blNow)
 	}
+	a.wantAllowlist(ack.AllowlistVersion)
 	for _, c := range ack.Commands {
 		a.command(ctx, c)
 	}

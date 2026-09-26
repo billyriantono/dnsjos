@@ -215,6 +215,26 @@ func TestEndToEnd(t *testing.T) {
 		t.Errorf("replayed blocked batch: want replay-e2e.example counted once (7), got %+v", rep.TopDomains)
 	}
 
+	// ── allowlist: an emergency unblock reaches dnsdist without a restart, and back ──
+	var allow api.AllowEntry
+	p.must(201, "POST", "/api/v1/allowlist", api.AllowEntryCreate{Kind: api.AllowDomain, Value: "Blocked.Example.", Reason: "e2e"}, &allow)
+	eventually(t, 20*time.Second, "allowlisted blocked.example gets the upstream answer", func() (bool, string) {
+		out := dig("blocked.example", "A")
+		return strings.Contains(out, "status: NXDOMAIN"), out // not a real name: upstream says NXDOMAIN
+	})
+	if out := dig("www.pornhub.com", "A", "+short"); out != blockV4 {
+		t.Errorf("www.pornhub.com A = %q: a sibling list entry must stay blocked", out)
+	}
+	eventually(t, 20*time.Second, "heartbeat reports the applied allowlist", func() (bool, string) {
+		p.must(200, "GET", "/api/v1/nodes/"+ac.NodeID+"/live", nil, &live)
+		return live.Heartbeat != nil && live.Heartbeat.AllowlistVersion != "", fmt.Sprintf("%+v", live.Heartbeat)
+	})
+	p.must(204, "DELETE", "/api/v1/allowlist/"+allow.ID, nil, nil)
+	eventually(t, 20*time.Second, "blocked.example blocked again", func() (bool, string) {
+		out := dig("blocked.example", "A", "+short")
+		return out == blockV4, out
+	})
+
 	// ── a new published version is re-rendered, dnsdist restarted, and served ──
 	spec.Blocking.BlockpageIPv4 = "10.9.9.9"
 	p.must(201, "POST", "/api/v1/profiles/"+def+"/versions", api.VersionCreate{Spec: spec, Comment: "e2e v2"}, &ver)

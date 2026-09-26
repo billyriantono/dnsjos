@@ -70,6 +70,8 @@ func validateSettings(s *api.Settings) string {
 		return "agent_poll_interval_s must be 5..3600"
 	case !in(s.AgentHeartbeatIntervalS, 5, 600):
 		return "agent_heartbeat_interval_s must be 5..600"
+	case !in(s.BlocklistDownloadSegments, 1, 16):
+		return "blocklist_download_segments must be 1..16"
 	}
 	s.PublicURL = strings.TrimRight(strings.TrimSpace(s.PublicURL), "/")
 	if s.PublicURL != "" {

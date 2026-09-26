@@ -33,8 +33,11 @@ import {
   useDeleteSource,
   useUpdateSource,
 } from '@/lib/api/client'
-import type { BlocklistBuild, BlocklistSource, BlocklistSourceKind } from '@/lib/api/types'
+import type { BlocklistBuild, BlocklistLookup, BlocklistSource, BlocklistSourceKind } from '@/lib/api/types'
 import { fmtBytes, fmtDuration, fmtNumber, shortSha } from '@/lib/format'
+import { looksLikeIP } from '@/lib/utils'
+
+import { AllowDialog, AllowlistCard } from './Allowlist'
 
 const KINDS: Record<BlocklistSourceKind, string> = {
   trustpositif_domains: 'TrustPositif domains',
@@ -120,6 +123,7 @@ export default function BlocklistPage() {
         <CurrentBuildCard build={current.data} loading={current.isPending} running={running} />
         <LookupCard />
       </div>
+      <AllowlistCard />
       <SourcesCard />
       <Card>
         <CardHeader>
@@ -231,6 +235,7 @@ function LookupCard() {
   const [input, setInput] = useState('')
   const [name, setName] = useState('')
   const q = useBlocklistLookup(name)
+  const [allowing, setAllowing] = useState(false)
   const submit = (e: FormEvent) => {
     e.preventDefault()
     setName(input.trim().toLowerCase())
@@ -239,7 +244,7 @@ function LookupCard() {
     <Card>
       <CardHeader>
         <CardTitle>Lookup</CardTitle>
-        <CardDescription>Check a domain or IPv4 against the current build (includes parent domains).</CardDescription>
+        <CardDescription>Check a domain or IPv4 against the current build (includes parent domains) and the allowlist.</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         <form onSubmit={submit} className="flex gap-2">
@@ -255,29 +260,58 @@ function LookupCard() {
           ) : q.error ? (
             <p className="text-sm text-destructive">{q.error.message}</p>
           ) : q.data ? (
-            <div
-              className={
-                'flex items-start gap-3 rounded-md border p-3 ' +
-                (q.data.blocked ? 'border-destructive/30 bg-destructive/10' : 'border-success/30 bg-success/10')
-              }
-            >
-              {q.data.blocked ? <LuShieldBan className="mt-0.5 size-5 text-destructive" /> : <LuShieldCheck className="mt-0.5 size-5 text-success" />}
-              <div className="min-w-0 text-sm">
-                <div className="font-medium break-all">
-                  {q.data.name} {q.data.blocked ? 'is blocked' : 'is not blocked'}
-                </div>
-                {q.data.blocked && (
-                  <div className="text-muted-foreground">
-                    matched <code className="font-mono break-all">{q.data.match}</code>
-                    {q.data.match !== q.data.name && ' (parent suffix)'}
-                  </div>
-                )}
-              </div>
-            </div>
+            <LookupResult r={q.data} onAllow={() => setAllowing(true)} />
           ) : null}
         </div>
+        {allowing && q.data && (
+          <AllowDialog initial={{ kind: looksLikeIP(q.data.name) ? 'ip' : 'domain', value: q.data.name }} onClose={() => setAllowing(false)} />
+        )}
       </CardContent>
     </Card>
+  )
+}
+
+function LookupResult({ r, onAllow }: { r: BlocklistLookup; onAllow: () => void }) {
+  const allowed = r.blocked && r.allowed
+  const tone = allowed ? 'border-warning/30 bg-warning/10' : r.blocked ? 'border-destructive/30 bg-destructive/10' : 'border-success/30 bg-success/10'
+  const Icon = r.blocked && !allowed ? LuShieldBan : LuShieldCheck
+  return (
+    <div className={'flex items-start gap-3 rounded-md border p-3 ' + tone}>
+      <Icon className={'mt-0.5 size-5 shrink-0 ' + (allowed ? 'text-warning' : r.blocked ? 'text-destructive' : 'text-success')} aria-hidden />
+      <div className="min-w-0 space-y-1 text-sm">
+        <div className="font-medium break-all">
+          {r.name} {allowed ? 'is on the blocklist but allowed' : r.blocked ? 'is blocked' : 'is not blocked'}
+        </div>
+        {r.blocked && (
+          <div className="text-muted-foreground">
+            matched <code className="font-mono break-all">{r.match}</code>
+            {r.match !== r.name && ' (parent suffix)'}
+          </div>
+        )}
+        {r.allow_entry && (
+          <div className="text-muted-foreground">
+            allowed by <code className="font-mono break-all">{r.allow_entry.value}</code>
+            {r.allow_entry.reason && <> · {r.allow_entry.reason}</>}
+            {r.allow_entry.created_by_email && <> · {r.allow_entry.created_by_email}</>} ·{' '}
+            {r.allow_entry.expires_at ? (
+              <>
+                expires <TimeAgo date={r.allow_entry.expires_at} />
+              </>
+            ) : (
+              'no expiry'
+            )}
+          </div>
+        )}
+        {r.blocked && !allowed && (
+          <RequireAdmin>
+            <Button size="sm" variant="outline" className="mt-1" onClick={onAllow}>
+              <LuShieldCheck />
+              {looksLikeIP(r.name) ? 'Allow this IP' : 'Allow this domain'}
+            </Button>
+          </RequireAdmin>
+        )}
+      </div>
+    </div>
   )
 }
 

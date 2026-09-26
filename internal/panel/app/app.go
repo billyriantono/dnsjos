@@ -154,5 +154,6 @@ func (s *Settings) Get() api.Settings {
 		AgentPollIntervalS:            s.Int("agent_poll_interval_s", api.DefaultPollS),
 		AgentHeartbeatIntervalS:       s.Int("agent_heartbeat_interval_s", api.DefaultHeartbS),
 		PublicURL:                     s.String("public_url", ""),
+		BlocklistDownloadSegments:     s.Int("blocklist_download_segments", 8),
 	}
 }

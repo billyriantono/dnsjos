@@ -24,6 +24,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/billyriantono/dnsjos/internal/shared/api"
+	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
 
 // TestRunTestMode drives enroll + run in test mode against a fake panel.
@@ -36,7 +37,7 @@ func TestRunTestMode(t *testing.T) {
 	var mu sync.Mutex
 	var hbs []api.Heartbeat
 	var batches []api.AnalyticsBatch
-	cmdSent := false
+	cmdSent, allowFetches := false, 0
 	fl, _ := net.Listen("tcp", "127.0.0.1:0")
 	streamAddr := fl.Addr().String()
 	fl.Close()
@@ -75,13 +76,24 @@ func TestRunTestMode(t *testing.T) {
 		w.Header().Set(api.Sha256Header, sha)
 		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(cdb))
 	}))
+	mux.HandleFunc("GET /agent/v1/allowlist", auth(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		allowFetches++
+		mu.Unlock()
+		w.Header().Set("ETag", `"al1"`)
+		if r.Header.Get("If-None-Match") == `"al1"` {
+			w.WriteHeader(304)
+			return
+		}
+		json.NewEncoder(w).Encode(api.Allowlist{Version: "al1", Domains: []string{"cdn.example", "a.example"}, IPs: []string{}})
+	}))
 	mux.HandleFunc("POST /agent/v1/heartbeat", auth(func(w http.ResponseWriter, r *http.Request) {
 		var hb api.Heartbeat
 		json.NewDecoder(r.Body).Decode(&hb)
 		mu.Lock()
 		defer mu.Unlock()
 		hbs = append(hbs, hb)
-		ack := api.HeartbeatAck{ConfigVersion: 3, BlocklistSHA256: sha}
+		ack := api.HeartbeatAck{ConfigVersion: 3, BlocklistSHA256: sha, AllowlistVersion: "al1"}
 		if !cmdSent {
 			ack.Commands, cmdSent = []api.Command{{ID: 7, Type: api.CmdReapply}}, true
 		}
@@ -128,7 +140,7 @@ func TestRunTestMode(t *testing.T) {
 			last = hbs[len(hbs)-1]
 		}
 		mu.Unlock()
-		if acked && last.AppliedConfigVersion == 3 && last.BlocklistSHA256 == sha {
+		if acked && last.AppliedConfigVersion == 3 && last.BlocklistSHA256 == sha && last.AllowlistVersion == "al1" {
 			break
 		}
 	}
@@ -148,8 +160,18 @@ func TestRunTestMode(t *testing.T) {
 	if err := <-done; err != nil {
 		t.Fatal(err)
 	}
-	if !acked || last.AppliedConfigVersion != 3 || last.BlocklistSHA256 != sha || last.ApplyError != "" || last.DnsdistRunning {
+	if !acked || last.AppliedConfigVersion != 3 || last.BlocklistSHA256 != sha || last.ApplyError != "" || last.DnsdistRunning ||
+		last.AllowlistVersion != "al1" {
 		t.Fatalf("last heartbeat: %+v acked=%v", last, acked)
+	}
+	// fetched at start only: the acks announce the version already applied
+	if allowFetches != 1 {
+		t.Errorf("allowlist fetched %d times", allowFetches)
+	}
+	for f, want := range map[string]string{dnsconf.FileAllowDomains: "cdn.example\na.example\n", dnsconf.FileAllowIPs: ""} {
+		if got, _ := os.ReadFile(filepath.Join(root, DnsdistDir, f)); string(got) != want {
+			t.Errorf("%s = %q, want %q", f, got, want)
+		}
 	}
 
 	conf, err := os.ReadFile(filepath.Join(root, DnsdistDir, "dnsdist.conf"))

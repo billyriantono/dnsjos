@@ -3,6 +3,8 @@ import type {
   AnalyticsKind,
   AnalyticsQuery,
   AnalyticsReport,
+  AllowEntry,
+  AllowEntryCreate,
   AuditEntry,
   AuditQuery,
   BlockedReport,
@@ -167,6 +169,11 @@ export const api = {
     current: () => get<BlocklistBuild | null>(`${V1}/blocklist/current`),
     lookup: (name: string) => get<BlocklistLookup>(`${V1}/blocklist/lookup?name=${enc(name)}`),
   },
+  allowlist: {
+    list: () => get<List<AllowEntry>>(`${V1}/allowlist`),
+    create: (e: AllowEntryCreate) => post<AllowEntry>(`${V1}/allowlist`, e),
+    remove: (id: string) => del(`${V1}/allowlist/${id}`),
+  },
   reports: {
     blocked: (q: BlockedReportQuery = {}) => get<BlockedReport>(`${V1}/reports/blocked${qs({ ...q })}`),
     /** URL for an <a href download> — the browser sends the session cookie. */
@@ -228,6 +235,7 @@ export const qk = {
   blocklistBuilds: ['blocklist', 'builds'] as const,
   blocklistCurrent: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
+  allowlist: ['allowlist'] as const,
   blocked: (q: BlockedReportQuery) => ['reports', 'blocked', q] as const,
   analytics: (q: AnalyticsQuery) => ['analytics', q] as const,
   offenders: (q: OffendersQuery) => ['offenders', q] as const,
@@ -304,6 +312,7 @@ export const useBlocklistCurrent = () =>
 /** Disabled while name is empty. */
 export const useBlocklistLookup = (name: string) =>
   useQuery({ queryKey: qk.blocklistLookup(name), queryFn: () => api.blocklist.lookup(name), enabled: name !== '' })
+export const useAllowlist = () => useQuery({ queryKey: qk.allowlist, queryFn: api.allowlist.list })
 export const useBlockedReport = (q: BlockedReportQuery) =>
   useQuery({ queryKey: qk.blocked(q), queryFn: () => api.reports.blocked(q) })
 export const useAnalytics = (q: AnalyticsQuery) =>
@@ -386,6 +395,9 @@ export const useBuildNow = () =>
     qk.blocklistSources,
     qk.overview,
   ])
+
+export const useAddAllow = () => useMut(api.allowlist.create, () => [qk.allowlist, ['blocklist', 'lookup']])
+export const useDeleteAllow = () => useMut(api.allowlist.remove, () => [qk.allowlist, ['blocklist', 'lookup']])
 
 export const useCreateUser = () => useMut(api.users.create, () => [qk.users])
 export const useUpdateUser = () =>

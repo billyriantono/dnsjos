@@ -210,7 +210,13 @@ func (s *Service) build(ctx context.Context, force bool) (res result, err error)
 		}
 	}
 
-	res.fingerprint = s.fingerprint(srcs)
+	// Active allowlist entries are left out of the CDB too, so they survive a node that
+	// restarts before its first allowlist sync (SPEC §7.5).
+	al, err := ActiveAllowlist(ctx, s.d.Pool)
+	if err != nil {
+		return res, err
+	}
+	res.fingerprint = s.fingerprint(srcs, al.Version)
 	if cur, err := Current(ctx, s.d.Pool); err != nil {
 		return res, err
 	} else if cur != nil {
@@ -222,6 +228,15 @@ func (s *Service) build(ctx context.Context, force bool) (res result, err error)
 	}
 
 	wl := map[string]struct{}{}
+	for _, n := range al.Domains {
+		wl[n] = struct{}{}
+	}
+	allowIPs := make([]netip.Prefix, 0, len(al.IPs))
+	for _, v := range al.IPs {
+		if p, err := parseAllowIP(v); err == nil {
+			allowIPs = append(allowIPs, p)
+		}
+	}
 	var inputs []input
 	trustPositif := false
 	for _, src := range srcs {
@@ -255,7 +270,7 @@ func (s *Service) build(ctx context.Context, force bool) (res result, err error)
 		f.Close()
 		os.Remove(f.Name()) // no-op after the rename
 	}()
-	st, err := writeCDB(ctx, f, inputs, wl)
+	st, err := writeCDB(ctx, f, inputs, wl, allowIPs)
 	res.domains, res.ips, res.whitelisted, res.skipped, res.entries = st.domains, st.ips, st.whitelisted, st.skipped, st.entries
 	if err != nil {
 		return res, err
@@ -292,7 +307,7 @@ type stats struct {
 // writeCDB streams every input line by line into a CDB at f and fsyncs it. Duplicates
 // are written as-is (dnsdist uses the first match), so memory is the writer's 8-byte
 // index entry per key, never the keys themselves.
-func writeCDB(ctx context.Context, f *os.File, inputs []input, wl map[string]struct{}) (st stats, err error) {
+func writeCDB(ctx context.Context, f *os.File, inputs []input, wl map[string]struct{}, allowIPs []netip.Prefix) (st stats, err error) {
 	st.entries = map[string]int{}
 	// Hide f's Close so Writer.Close only finalizes; we fsync and close ourselves.
 	w, err := cdb.NewWriter(struct{ io.WriteSeeker }{f}, nil)
@@ -332,7 +347,7 @@ func writeCDB(ctx context.Context, f *os.File, inputs []input, wl map[string]str
 					if err != nil {
 						return
 					}
-					if _, ok := wl[a.String()]; ok {
+					if _, ok := wl[a.String()]; ok || slices.ContainsFunc(allowIPs, func(p netip.Prefix) bool { return p.Contains(a) }) {
 						st.whitelisted++
 					} else if err = w.Put(keys.IPv4Key(a), nil); err == nil {
 						st.ips++
@@ -361,42 +376,37 @@ func writeCDB(ctx context.Context, f *os.File, inputs []input, wl map[string]str
 
 // fetch downloads a URL source to its raw file. changed=false on 304 (the previous
 // download stays and is still built from). force skips the conditional request.
-// The status records size, time and throughput so download speed can be compared.
+// The status records size, time, throughput and streams so download speed can be compared.
 func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bool, err error) {
 	path := s.sourcePath(src.ID)
 	start := time.Now()
 	var n int64
+	streams := 1
 	defer func() {
 		took := time.Since(start)
 		status := fmt.Sprintf("not modified (%d ms)", took.Milliseconds())
 		if err != nil {
 			status = "error: " + err.Error()
 		} else if changed {
-			mbps := float64(n) / 1e6 / took.Seconds()
-			status = fmt.Sprintf("ok: %.1f MB in %.1f s (%.1f MB/s, 1 stream)", float64(n)/1e6, took.Seconds(), mbps)
-			s.d.Log.Info("blocklist fetch", "source", src.ID, "bytes", n, "seconds", took.Seconds(), "mb_per_s", mbps, "streams", 1)
+			status = fetchStatus(n, took, streams)
+			s.d.Log.Info("blocklist fetch", "source", src.ID, "bytes", n, "seconds", took.Seconds(),
+				"mb_per_s", float64(n)/1e6/took.Seconds(), "streams", streams)
 		}
 		_, _ = s.d.Pool.Exec(context.WithoutCancel(ctx),
 			"UPDATE blocklist_sources SET last_fetch_at = now(), last_status = $2 WHERE id = $1", src.ID, status)
 	}()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, src.URL, nil)
-	if err != nil {
-		return false, err
-	}
-	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Accept", "text/plain,*/*")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	hdr := map[string]string{}
 	_, statErr := os.Stat(path)
 	haveFile := statErr == nil
 	if haveFile && !force { // conditional only when we still hold the copy a 304 refers to
 		if src.ETag != "" {
-			req.Header.Set("If-None-Match", src.ETag)
+			hdr["If-None-Match"] = src.ETag
 		}
 		if src.LastModified != "" {
-			req.Header.Set("If-Modified-Since", src.LastModified)
+			hdr["If-Modified-Since"] = src.LastModified
 		}
 	}
-	resp, err := s.client.Do(req)
+	resp, err := s.get(ctx, src.URL, hdr)
 	if err != nil {
 		return false, err
 	}
@@ -408,17 +418,8 @@ func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bo
 		return false, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	tmp := path + ".tmp"
-	out, err := os.Create(tmp)
-	if err != nil {
-		return false, err
-	}
-	n, err = io.Copy(out, resp.Body)
-	if err == nil {
-		err = out.Sync()
-	}
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
+	var etag, lastMod string
+	n, streams, etag, lastMod, err = s.download(ctx, resp, src.URL, tmp, s.d.Settings.Get().BlocklistDownloadSegments)
 	if err == nil {
 		err = os.Rename(tmp, path)
 	}
@@ -427,15 +428,15 @@ func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bo
 		return false, err
 	}
 	_, err = s.d.Pool.Exec(ctx, "UPDATE blocklist_sources SET etag = $2, last_modified = $3 WHERE id = $1",
-		src.ID, resp.Header.Get("ETag"), resp.Header.Get("Last-Modified"))
+		src.ID, etag, lastMod)
 	return err == nil, err
 }
 
 // fingerprint identifies the build inputs: raw files by size+mtime (a 200 rewrites
 // the file), manual lists by content.
-func (s *Service) fingerprint(srcs []source) string {
+func (s *Service) fingerprint(srcs []source, allowVersion string) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "v%s floor=%d\n", builderVersion, minDomains)
+	fmt.Fprintf(h, "v%s floor=%d allow=%s\n", builderVersion, minDomains, allowVersion)
 	for _, src := range srcs {
 		fmt.Fprintf(h, "%s %s ", src.ID, src.Kind)
 		if isURLKind(src.Kind) {

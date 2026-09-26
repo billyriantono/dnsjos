@@ -153,9 +153,14 @@ The full initial schema is `migrations/0001_init.up.sql`. Summary:
 * `blocked_daily(day date, node_id, qname text, qtype text, count bigint, pk(day,node_id,qname,qtype))` — retention 800 days.
 * `offender_events(id bigserial, node_id, client inet/cidr text, stage 'warning'|'blocked', reason, first_seen, last_seen, blocks bigint)` — unique open event per (node, client, reason) until 10 min unseen.
 * `audit_log(id bigserial, at, user_id, action, target_type, target_id, details jsonb, ip)`
-* `settings(key text pk, value jsonb)` — panel-wide settings (builder schedule, retention, public URL).
+* `settings(key text pk, value jsonb)` — panel-wide settings (builder schedule, retention, public URL,
+  `blocklist_download_segments`).
 * `ingested_batches(node_id, batch_key, at, pk(node_id,batch_key))` — `0005`: committed
   agent batch keys (§8 Idempotency-Key), pruned after 7 days by the hourly retention job.
+* `allowlist(id uuid, kind 'domain'|'ip', value text, reason text, created_by → users (set null),
+  created_at, expires_at null, unique(kind, value))` — `0006`: the emergency allowlist (§7.5).
+  `value` is normalized (domain: lowercase, no trailing dot; ip: address or masked CIDR).
+  Rows with `expires_at ≤ now()` are ignored everywhere and deleted by an hourly job.
 
 ---
 
@@ -282,6 +287,15 @@ Rendering rules (must be byte-for-byte deterministic for the same input):
      default** (`DefaultConfigSpec`, the web profile defaults) and adoption sends
      `blocking.block_response_ips: false` explicitly in its node overrides. Profiles
      stored with `true` keep it.
+   * Allowlist (§7.5): the agent-owned files `dnsjos/allowlist-domains.txt` and
+     `dnsjos/allowlist-ips.txt` (one entry per line; missing file = empty list) are loaded
+     at startup and by the global console function `dnsjosAllowReload()`, which rebuilds a
+     `SuffixMatchNode` + `NetmaskGroup`, swaps them in, expunges the packet cache for every
+     added/removed name (the whole cache when an IP entry is removed) and returns
+     `allowlist: <n> domains, <n> ips, <n> invalid`. A query tagged blocked whose qname is
+     equal to or below an allowed name is re-tagged `allowed` (rule `dnsjos-allowlist`)
+     **before** any blocked-answer rule, so it resolves normally; answers whose A record is
+     in the allowed IP set are never rewritten by the response-IP rule. No restart.
    * Every rule gets its own selector object (dnsdist counts hits on the selector, so a
      shared `TagRule` inflates every rule that uses it).
 10. Abuse (abuse.lua): `MaxQPSIPRule(per_client_qps, 32, 64, burst)` → `DropAction()`
@@ -318,6 +332,19 @@ manual lists (textarea) and a whitelist.
 Fetch with a browser User-Agent, `If-None-Match` / `If-Modified-Since`, 120 s timeout,
 streaming (never hold the 220 MB body in memory as a string).
 
+**Parallel download.** When the conditional request says a download is needed (or on a
+forced build) and the 200 carries `Accept-Ranges: bytes`, `Content-Length` ≥ 8 MiB and a
+strong `ETag`, the body is fetched as `blocklist_download_segments` (setting, 1..16, default
+8; 1 = always one stream) parallel byte ranges written with `WriteAt` into a preallocated
+temp file. Every range request carries `If-Range: <that ETag>`; a range answer that is not
+a `206` for exactly the requested range with the same ETag aborts the ranges, and so does a
+segment that still fails after 3 retries (each resuming from the segment's progress): the
+source is then fetched again as one clean single-stream GET. The total must equal
+`Content-Length`; the file is fsynced and renamed into place. Small files, servers without
+ranges and `segments = 1` keep the single stream. The source's `last_status` reads
+`ok: 217.3 MB in 2.9 s (74.9 MB/s, 8 streams)` (`1 stream` for a single stream) and the
+same fields (`bytes`, `seconds`, `mb_per_s`, `streams`) are logged.
+
 ### 7.2 Build
 
 * Schedule: every 3 h (setting), plus "Build now" button.
@@ -328,7 +355,9 @@ streaming (never hold the 220 MB body in memory as a string).
 * Normalize domains: lowercase, strip comments/whitespace/scheme/path/port, trailing dot,
   IDN → punycode, validate charset `[a-z0-9._-]`, labels ≤ 63, name ≤ 253.
 * Whitelist entries are removed (exact name match; whitelist `example.com` also removes
-  `*.example.com` entries).
+  `*.example.com` entries). Active allowlist entries (§7.5) are removed the same way (IP
+  entries by prefix) and counted in `whitelisted`; the allowlist version is part of the
+  input fingerprint, so an allowlist change makes the next scheduled build rebuild.
 * Sanity floor: refuse to publish if domains < 100 000 **when the TrustPositif domains
   source is enabled** (status `failed`, keep previous build).
 * Write CDB to `<tmp>` in the same dir, fsync, rename to `<sha256>.cdb`. Keep the last 3.
@@ -351,6 +380,30 @@ expanded only if ≤ /24 (≤ 256 keys), larger ones are skipped and counted.
 
 ---
 
+### 7.5 Allowlist (emergency unblock)
+
+The regulator's list sometimes contains shared infrastructure (a CDN hostname or address)
+whose blocking takes down unrelated sites. The allowlist overrides the blocklist within
+seconds, fleet-wide, without a build or a dnsdist restart:
+
+* Admins add `domain` entries (the name **and every name below it**) or `ip` entries (an
+  address or CIDR; IPv4 ≥ /8, IPv6 ≥ /16) with a reason and an optional expiry. TLDs and
+  IPs given as domains are rejected (422 `invalid_entry`).
+* The active set has a version (`api.Allowlist.version`: 16 hex chars of sha256 over the
+  sorted entries; never empty). The panel announces it in `AgentConfig.allowlist_version`
+  and in every `HeartbeatAck.allowlist_version`; an agent seeing a new version fetches
+  `GET /agent/v1/allowlist`, writes the two files of §6.4 atomically (0644) and calls
+  `dnsjosAllowReload()`. With the default 10 s heartbeat the change is live on every node
+  within ~15 s. An empty/missing `allowlist_version` means a panel without allowlist
+  support: the agent does nothing. The config ETag does not include the allowlist.
+* Builds leave allowlisted entries out of the CDB (§7.2), so a permanent entry also holds
+  on a node that restarts before its first allowlist sync. Deleting (or expiring) an entry
+  re-blocks immediately on the nodes only for names still in the node's current CDB; names
+  dropped from the CDB by an earlier build come back with the next build (run **Build now**
+  to re-block at once).
+* The blocklist lookup reports `allowed` and the matching entry, so the UI can show
+  "blocked by the list but allowed".
+
 ## 8. Agent protocol (`/agent/v1`, bearer = node token)
 
 All agent requests carry `Authorization: Bearer <node_token>` and
@@ -359,9 +412,10 @@ All agent requests carry `Authorization: Bearer <node_token>` and
 | Method & path | Body → Response |
 |---|---|
 | `POST /agent/v1/enroll` (no bearer; enrollment token in body) | `api.EnrollRequest{token, hostname, os, arch, agent_version, dnsdist_version, public_ip, adopt, adopt_overrides}` → `api.EnrollResponse{node_id, name, node_token, poll_interval_s}`; 401 `invalid_token`; 422 `invalid_config` when `adopt_overrides` does not merge into a valid spec (the token is not consumed) |
-| `GET /agent/v1/config` (`If-None-Match: "<version>"`) | 304 or `api.AgentConfig{version, spec (effective, merged), profile, blocklist{sha256,size,url}, poll_interval_s, heartbeat_interval_s}`; 404 `no_config` (profile has nothing published); 409 `invalid_config` (overrides no longer valid); 409 `no_blocklist` (adopted node, see §17) |
+| `GET /agent/v1/config` (`If-None-Match: "<version>"`) | 304 or `api.AgentConfig{version, spec (effective, merged), profile, blocklist{sha256,size,url}, poll_interval_s, heartbeat_interval_s, allowlist_version}`; 404 `no_config` (profile has nothing published); 409 `invalid_config` (overrides no longer valid); 409 `no_blocklist` (adopted node, see §17) |
 | `GET /agent/v1/blocklist` | CDB stream (see §7.4) |
-| `POST /agent/v1/heartbeat` | `api.Heartbeat` → `api.HeartbeatAck{config_version, blocklist_sha256, commands[]}` |
+| `GET /agent/v1/allowlist` (`If-None-Match: "<version>"`) | 304 or `api.Allowlist{version, domains[], ips[]}` with `ETag: "<version>"` (§7.5; only unexpired entries) |
+| `POST /agent/v1/heartbeat` | `api.Heartbeat` → `api.HeartbeatAck{config_version, blocklist_sha256, commands[], allowlist_version}` |
 | `POST /agent/v1/blocked` | `api.BlockedBatch{items:[{day, qname, qtype, count}]}` → 204 (Idempotency-Key, below) |
 | `POST /agent/v1/analytics` | `api.AnalyticsBatch` (§19; body ≤ `api.AnalyticsMaxBody` = 10 MiB, checked by `AnalyticsBatch.Validate` → 422 `invalid_batch`) → 204 (Idempotency-Key, below) |
 | `POST /agent/v1/cgk` | `api.CGKReport{measured_at, aliases[], rewrite_ranges[], pools:[{net, colos[]}], ok bool, message}` → 204 |
@@ -432,6 +486,10 @@ their outcome arrives later as `last_upgrade`. Panel ingest stores the inventory
   2. **Blocklist**: every 60 s compare panel sha256 with local; download to
      `current.cdb.tmp`, verify sha256, rename atomically. No dnsdist restart needed
      (CDBKVStore refresh delay 60 s).
+  2a. **Allowlist** (§7.5): when `allowlist_version` (config or heartbeat ack) differs from
+     the applied one, `GET /allowlist` with ETag, write `<BaseDir>/dnsjos/allowlist-domains.txt`
+     and `allowlist-ips.txt` (one entry per line, temp file + rename, 0644) and call
+     `dnsjosAllowReload()` over the console; retry on failure. No restart.
   3. **Heartbeat** every 10 s: read `/jsonstat?command=stats` and
      `/api/v1/servers/localhost` from the local webserver (API key), dynblocks via
      `/jsonstat?command=dynblocklist`, system stats from `/proc`.
@@ -499,7 +557,8 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `POST /api/v1/profiles/{id}/preview` | `PreviewRequest{spec}` (validated, not saved) → `RenderedConfig` |
 | `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate` → 201 `BlocklistSource` · `BlocklistSourcePatch` → `BlocklistSource` · 204 |
 | `GET /api/v1/blocklist/builds` · `POST /blocklist/builds` · `GET /blocklist/current` | `List[BlocklistBuild]` (newest first) · build now → 202 `BlocklistBuild` · current `BlocklistBuild` or `null` |
-| `GET /api/v1/blocklist/lookup?name=` | `BlocklistLookup{name,blocked,match}` (checks current CDB incl. suffix walk) |
+| `GET /api/v1/blocklist/lookup?name=` | `BlocklistLookup{name,blocked,match,allowed,allow_entry}` (checks current CDB incl. suffix walk; `allowed`/`allow_entry` = the most specific active allowlist entry covering the name or IP, else `false`/`null`) |
+| `GET /api/v1/allowlist` · `POST` · `DELETE /allowlist/{id}` | `List[AllowEntry{id,kind,value,reason,created_by_email,created_at,expires_at}]` (active entries, newest first) · admin: `AllowEntryCreate{kind,value,reason,expires_at?}` → 201 `AllowEntry` (value normalized; 422 `invalid_entry` for a bad kind/value, a TLD, a too-broad prefix, reason > 1000 bytes or an expiry not in the future; 409 `conflict` when the entry is already active — an expired row is replaced) · admin: 204 (404 unknown). Audited as `allowlist.create` / `allowlist.delete` (§7.5) |
 | `GET /api/v1/reports/blocked?from&to&node_id&limit` | `BlockedReport{total,by_node,by_month,top_domains}` (`from`/`to` are dates `YYYY-MM-DD`) |
 | `GET /api/v1/reports/blocked.csv?...&kind=` | `text/csv` attachment; kind ∈ `api.CSVKinds` (summary / monthly / top) |
 | `GET /api/v1/analytics?from&to&node_id&kind&limit` | `AnalyticsReport{from,to,total,by_qtype,by_rcode,by_day,top}` (§19). `from`/`to` dates `YYYY-MM-DD` (default: last 7 days), `kind` ∈ `api.AnalyticsKinds` (default `queried`), `limit` 1..1000 (default 100); 400 `bad_request` otherwise |
@@ -507,7 +566,7 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET /api/v1/offenders?active=true&node_id` | `List[Offender]` — abusive clients (open + history) |
 | `GET /api/v1/users` · `POST` · `PATCH /users/{id}` · `DELETE /users/{id}` | admin only: `List[User]` · `UserCreate` → 201 `User` · `UserPatch` → `User` · 204 |
 | `GET /api/v1/audit?limit&before` | admin only: `List[AuditEntry]`, newest first, `before` = audit id cursor |
-| `GET/PUT /api/v1/settings` | `Settings` · PUT decodes over current values (partial body ok) → `Settings` |
+| `GET/PUT /api/v1/settings` | `Settings` · PUT decodes over current values (partial body ok) → `Settings`; `blocklist_download_segments` 1..16 (§7.1), other ranges as in the UI; 400 otherwise |
 | `GET /healthz` · `GET /readyz` (DB ping) | health |
 | `GET /api/v1/branding` | public: `Branding{name, tagline, assets}` — `assets` has every `api.BrandingAssets` key (`login_logo`, `navbar_light`, `navbar_dark`, `login_bg`, `login_bg_mobile`, `cloud`, `favicon_ico`, `icon_192`, `icon_512`, `apple_touch`), each `/branding/<file>?v=<mtime>` or `null` when the file is absent (§15) |
 | `GET /branding/{file}` | public: a file from `DNSJOS_BRAND_DIR`, only the names in `api.BrandingFiles` (correct `Content-Type`, `Cache-Control: public, max-age=86400`); anything else 404 |

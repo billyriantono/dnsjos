@@ -11,6 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -30,17 +32,23 @@ func freePort(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
-// TestLiveBlocking runs the rendered blocking module in a real dnsdist (skipped when
-// dnsdist is not on PATH) and checks the response-IP rewrite, its counting on
-// repeated queries (cache) and the per-rule hit counters / metric names.
-func TestLiveBlocking(t *testing.T) {
+type liveDnsdist struct {
+	dir, conf, listen, web string
+	hits                   sync.Map // qname → *atomic.Int32 (backend queries)
+	query                  func(name string, qt uint16) *dns.Msg
+	console                func(cmd string) string
+}
+
+// startDnsdist runs the rendered config (blocking + response IPs, CDB: blocked.example
+// and 192.0.2.1) in a real dnsdist against a backend answering the A records in ips;
+// it skips when dnsdist is not on PATH.
+func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
 	bin, err := exec.LookPath("dnsdist")
 	if err != nil {
 		t.Skip("dnsdist not on PATH")
 	}
-	dir := t.TempDir()
+	d := &liveDnsdist{dir: t.TempDir()}
 
-	// Backend: mixed.example has one listed and one unlisted address.
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -49,9 +57,10 @@ func TestLiveBlocking(t *testing.T) {
 		m := new(dns.Msg)
 		m.SetReply(r)
 		q := r.Question[0]
+		n, _ := d.hits.LoadOrStore(q.Name, new(atomic.Int32))
+		n.(*atomic.Int32).Add(1)
 		if q.Qtype == dns.TypeA {
-			ips := map[string][]string{"mixed.example.": {"192.0.2.1", "198.51.100.1"}, "clean.example.": {"198.51.100.2"}}[q.Name]
-			for _, ip := range ips {
+			for _, ip := range ips[q.Name] {
 				rr, _ := dns.NewRR(fmt.Sprintf("%s 3600 IN A %s", q.Name, ip))
 				m.Answer = append(m.Answer, rr)
 			}
@@ -59,9 +68,9 @@ func TestLiveBlocking(t *testing.T) {
 		w.WriteMsg(m)
 	})}
 	go backend.ActivateAndServe()
-	defer backend.Shutdown()
+	t.Cleanup(func() { backend.Shutdown() })
 
-	cdbPath := filepath.Join(dir, "bl.cdb")
+	cdbPath := filepath.Join(d.dir, "bl.cdb")
 	f, _ := os.Create(cdbPath)
 	cw, err := cdbw.NewWriter(f, nil)
 	if err != nil {
@@ -75,25 +84,26 @@ func TestLiveBlocking(t *testing.T) {
 	f.Close()
 
 	spec := api.DefaultConfigSpec()
-	listen := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	web := fmt.Sprintf("127.0.0.1:%d", freePort(t))
-	spec.Listen.Do53.Addresses = []string{listen}
-	spec.Webserver.Listen = web
+	d.listen = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	d.web = fmt.Sprintf("127.0.0.1:%d", freePort(t))
+	spec.Listen.Do53.Addresses = []string{d.listen}
+	spec.Webserver.Listen = d.web
 	spec.Upstreams.Servers = []api.Upstream{{Address: pc.LocalAddr().String(), Weight: 1, Order: 1, Sockets: 1}}
 	spec.Abuse.Enabled, spec.CGK.Enabled, spec.Blocking.LogBlocked = false, false, false
 	spec.Blocking.BlockResponseIPs = true                                // opt-in since it became off by default
 	spec.Analytics.StreamAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t)) // nobody listens; fine
 	rt := testRT
-	rt.BaseDir, rt.CDBPath = dir, cdbPath
+	rt.BaseDir, rt.CDBPath = d.dir, cdbPath
 	files, err := Render(spec, rt)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for rel, b := range files {
-		os.MkdirAll(filepath.Dir(filepath.Join(dir, rel)), 0o755)
-		os.WriteFile(filepath.Join(dir, rel), b, 0o644)
+		os.MkdirAll(filepath.Dir(filepath.Join(d.dir, rel)), 0o755)
+		os.WriteFile(filepath.Join(d.dir, rel), b, 0o644)
 	}
-	cmd := exec.Command(bin, "--supervised", "--disable-syslog", "-C", filepath.Join(dir, FileConf))
+	d.conf = filepath.Join(d.dir, FileConf)
+	cmd := exec.Command(bin, "--supervised", "--disable-syslog", "-C", d.conf)
 	out, _ := cmd.StdoutPipe()
 	cmd.Stderr = cmd.Stdout
 	if err := cmd.Start(); err != nil {
@@ -101,14 +111,14 @@ func TestLiveBlocking(t *testing.T) {
 	}
 	var log strings.Builder
 	go io.Copy(&log, bufio.NewReader(out))
-	defer func() { cmd.Process.Kill(); cmd.Wait() }()
+	t.Cleanup(func() { cmd.Process.Kill(); cmd.Wait() })
 
 	c := &dns.Client{Timeout: time.Second}
-	query := func(name string, qt uint16) *dns.Msg {
+	d.query = func(name string, qt uint16) *dns.Msg {
 		m := new(dns.Msg)
 		m.SetQuestion(name, qt)
 		for range 50 {
-			if r, _, err := c.Exchange(m, listen); err == nil && r.Rcode != dns.RcodeServerFailure {
+			if r, _, err := c.Exchange(m, d.listen); err == nil && r.Rcode != dns.RcodeServerFailure {
 				return r
 			}
 			time.Sleep(100 * time.Millisecond)
@@ -116,6 +126,22 @@ func TestLiveBlocking(t *testing.T) {
 		t.Fatalf("no answer for %s from dnsdist:\n%s", name, log.String())
 		return nil
 	}
+	d.console = func(command string) string {
+		out, err := exec.Command(bin, "-C", d.conf, "-c", "-e", command).CombinedOutput()
+		if err != nil {
+			t.Fatalf("console %s: %v: %s", command, err, out)
+		}
+		return string(out)
+	}
+	return d
+}
+
+// TestLiveBlocking checks the response-IP rewrite, its counting on repeated queries
+// (cache) and the per-rule hit counters / metric names.
+func TestLiveBlocking(t *testing.T) {
+	// mixed.example has one listed and one unlisted address.
+	d := startDnsdist(t, map[string][]string{"mixed.example.": {"192.0.2.1", "198.51.100.1"}, "clean.example.": {"198.51.100.2"}})
+	query, web := d.query, d.web
 
 	for i := range 3 {
 		r := query("mixed.example.", dns.TypeA)
@@ -166,4 +192,70 @@ func TestLiveBlocking(t *testing.T) {
 			t.Errorf("%s = %q, want %s", k, series[k], want)
 		}
 	}
+}
+
+// TestLiveAllowlist: dnsjosAllowReload() applies the agent's allowlist files without a
+// restart: an allowed name and its subdomains resolve, siblings stay blocked, cached
+// answers of changed names are flushed, and allowed addresses skip the response-IP block.
+func TestLiveAllowlist(t *testing.T) {
+	d := startDnsdist(t, map[string][]string{
+		"a.blocked.example.": {"198.51.100.4"}, "x.a.blocked.example.": {"198.51.100.5"}, "b.blocked.example.": {"198.51.100.6"},
+		"mixed.example.": {"192.0.2.1", "198.51.100.1"}, "clean.example.": {"198.51.100.2"},
+	})
+	a := func(name string) string {
+		var ips []string
+		for _, rr := range d.query(name, dns.TypeA).Answer {
+			ips = append(ips, rr.(*dns.A).A.String())
+		}
+		return strings.Join(ips, ",")
+	}
+	allow := func(domains, ips string) string {
+		for f, v := range map[string]string{FileAllowDomains: domains, FileAllowIPs: ips} {
+			if err := os.WriteFile(filepath.Join(d.dir, f), []byte(v), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		return d.console("dnsjosAllowReload()")
+	}
+	check := func(want map[string]string) {
+		t.Helper()
+		for name, ip := range want {
+			if got := a(name); got != ip {
+				t.Errorf("%s = %q, want %q", name, got, ip)
+			}
+		}
+	}
+	const bp = "192.0.2.10"
+	check(map[string]string{"a.blocked.example.": bp, "mixed.example.": bp + "," + bp, "clean.example.": "198.51.100.2"})
+	a("clean.example.") // cached
+	hits := func(name string) int32 { n, _ := d.hits.Load(name); return n.(*atomic.Int32).Load() }
+	if hits("clean.example.") != 1 {
+		t.Fatalf("clean.example not cached: %d backend queries", hits("clean.example."))
+	}
+
+	if out := allow("# emergency unblocks\na.blocked.example\nclean.example\nnot a name..\n", ""); !strings.Contains(out, "allowlist: 2 domains, 0 ips, 1 invalid") {
+		t.Fatalf("reload: %s", out)
+	}
+	check(map[string]string{"a.blocked.example.": "198.51.100.4", "x.a.blocked.example.": "198.51.100.5",
+		"b.blocked.example.": bp, "blocked.example.": bp})
+	if a("clean.example."); hits("clean.example.") != 2 {
+		t.Errorf("cached answer of a newly allowed name not flushed")
+	}
+
+	allow("", "") // removed: blocked again although the real answer is cached
+	check(map[string]string{"a.blocked.example.": bp, "x.a.blocked.example.": bp})
+
+	allow("", "192.0.2.0/24\n")
+	check(map[string]string{"mixed.example.": "192.0.2.1,198.51.100.1"}) // now cached
+	allow("", "")
+	check(map[string]string{"mixed.example.": bp + "," + bp}) // cache flushed on removal
+	allow("mixed.example\n", "")
+	check(map[string]string{"mixed.example.": "192.0.2.1,198.51.100.1"}) // allowed name skips the IP block too
+
+	os.Remove(filepath.Join(d.dir, FileAllowDomains))
+	os.Remove(filepath.Join(d.dir, FileAllowIPs))
+	if out := d.console("dnsjosAllowReload()"); !strings.Contains(out, "allowlist: 0 domains, 0 ips, 0 invalid") {
+		t.Fatalf("missing files: %s", out)
+	}
+	check(map[string]string{"mixed.example.": bp + "," + bp})
 }

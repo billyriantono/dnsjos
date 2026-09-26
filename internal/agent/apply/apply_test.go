@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -15,7 +16,8 @@ import (
 )
 
 // fakeDnsdist fails --check-config for configs containing CHECKFAIL and the console
-// (showVersion) for configs containing CONSOLEFAIL; every call is logged.
+// (showVersion) for configs containing CONSOLEFAIL; every call is logged. The first
+// failing console call writes to the FIFO $FAKE_SIGNAL, if there is one, and removes it.
 const fakeDnsdist = `#!/bin/sh
 echo "$@" >> "$FAKE_LOG"
 while [ $# -gt 0 ]; do
@@ -31,7 +33,10 @@ if [ -n "$check" ]; then
   echo "Configuration '$conf' OK!"; exit 0
 fi
 if [ -n "$cmd" ]; then
-  grep -q CONSOLEFAIL "$conf" && { echo "Connection refused"; exit 1; }
+  if grep -q CONSOLEFAIL "$conf"; then
+    [ -p "$FAKE_SIGNAL" ] && { echo failing > "$FAKE_SIGNAL"; rm -f "$FAKE_SIGNAL"; }
+    echo "Connection refused"; exit 1
+  fi
   echo "dnsdist 2.0.10"; exit 0
 fi
 exit 0
@@ -234,8 +239,22 @@ func TestApplyRollbackSurvivesCancel(t *testing.T) {
 	a, log := setup(t, true)
 	os.MkdirAll(a.Dir, 0o755)
 	os.WriteFile(a.Conf(), []byte("-- packaged dnsdist.conf\n"), 0o640)
+	// cancel exactly when the new config's verification has started failing
+	fifo := filepath.Join(t.TempDir(), "signal")
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAKE_SIGNAL", fifo)
 	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(500*time.Millisecond, cancel)
+	cancelled := make(chan struct{})
+	go func() {
+		defer close(cancelled)
+		if f, err := os.Open(fifo); err == nil { // blocks until the stub writes
+			io.ReadAll(f)
+			f.Close()
+		}
+		cancel()
+	}()
 	_, err := a.Apply(ctx, spec("-- CONSOLEFAIL"), rt(a.Dir), false)
 	if err == nil || !strings.Contains(err.Error(), "rolled back") || strings.Contains(err.Error(), "canceled") {
 		t.Fatalf("want a completed rollback, got %v", err)
@@ -247,6 +266,7 @@ func TestApplyRollbackSurvivesCancel(t *testing.T) {
 	if i := strings.LastIndex(calls, "showVersion()"); i < 0 || !strings.Contains(calls[:i], "showVersion()") {
 		t.Fatalf("console not verified after the rollback:\n%s", calls)
 	}
+	<-cancelled
 	// already cancelled: nothing is touched
 	if _, err := a.Apply(ctx, spec("-- v2"), rt(a.Dir), false); err == nil || read(t, a.Conf()) != "-- packaged dnsdist.conf\n" {
 		t.Fatalf("cancelled apply swapped: %v", err)

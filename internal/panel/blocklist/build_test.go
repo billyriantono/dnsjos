@@ -187,6 +187,7 @@ func TestBuildFlow(t *testing.T) {
 
 	testServeCDB(t, d, s)
 	testAPI(t, d, s)
+	testAllowlist(t, d, s)
 }
 
 func testServeCDB(t *testing.T, d *app.Deps, s *Service) {

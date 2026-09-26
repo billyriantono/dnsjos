@@ -13,6 +13,21 @@ import (
 // ponytail: 8 covers real answers; raise it if blocked IPs hide behind longer RRsets.
 const ripSlots = 8
 
+// readListLua reads a one-entry-per-line file ('#' comments) shared by the modules.
+const readListLua = `local function readList(path, fallback, allowEmpty)
+  local f = io.open(path, "r")
+  if not f then return fallback end
+  local t = {}
+  for line in f:lines() do
+    line = line:gsub("#.*", ""):match("^%s*(.-)%s*$")
+    if line ~= "" then t[#t + 1] = line end
+  end
+  f:close()
+  if #t == 0 and not allowEmpty then return fallback end
+  return t
+end
+`
+
 // skipNameLua is shared by the response parsers (Lua 1-based offsets).
 const skipNameLua = `local function skipName(p, pos)
   while true do
@@ -53,10 +68,57 @@ func renderBlocking(b api.Blocking, rt api.NodeRuntime) ([]byte, error) {
 declareMetric("dnsjos-blocked", "counter", "Queries answered with the blockpage")
 `)
 	w("local kvs = newCDBKVStore(%s, 60)\n", luaString(rt.CDBPath))
-	// A fresh TagRule per rule: dnsdist counts matches on the selector object, so a
-	// shared one would make every rule's hit counter the sum of all of them.
-	s.WriteString(`local function blocked() return TagRule("dnsjos", "blocked") end
+	w(`
+-- Allowlist (emergency unblock of false positives such as CDN names): names in
+-- ALLOW_DOMAINS_FILE, and every name below them, are never blocked; addresses in
+-- ALLOW_IPS_FILE never trigger the response-IP block. The agent rewrites both files
+-- and calls dnsjosAllowReload() over the console; a missing file is an empty list.
+local ALLOW_DOMAINS_FILE = %s
+local ALLOW_IPS_FILE = %s
+`, luaString(path.Join(rt.BaseDir, FileAllowDomains)), luaString(path.Join(rt.BaseDir, FileAllowIPs)))
+	s.WriteString(readListLua)
+	// SuffixMatchNodeRule copies its SMN, so a reload could not update it; the set lives
+	// in a Lua upvalue swapped by dnsjosAllowReload() and is checked only for CDB hits.
+	s.WriteString(`local allowSMN, allowNMG, allowNames, allowMasks, allowIPs = newSuffixMatchNode(), newNMG(), {}, {}, 0
+
+function dnsjosAllowReload()
+  local smn, nmg, names, masks, nd, ni, bad = newSuffixMatchNode(), newNMG(), {}, {}, 0, 0, 0
+  for _, n in ipairs(readList(ALLOW_DOMAINS_FILE, {}, true)) do
+    local ok, dn = pcall(newDNSName, n)
+    if ok then smn:add(dn); names[n] = dn; nd = nd + 1 else bad = bad + 1 end
+  end
+  for _, m in ipairs(readList(ALLOW_IPS_FILE, {}, true)) do
+    if pcall(function() nmg:addMask(m) end) then masks[m] = true; ni = ni + 1 else bad = bad + 1 end
+  end
+  -- Cached answers must not outlive the change: a newly allowed name may still have a
+  -- blocked answer cached. Queries are checked before the cache, but response-IP
+  -- rewrites are not re-applied to cache hits, so a removed entry flushes too (a
+  -- removed address can hide behind any name: the whole cache).
+  local cache = getPool(""):getCache()
+  if cache then
+    local all = false
+    for m in pairs(allowMasks) do all = all or not masks[m] end
+    if all then
+      cache:expunge(0)
+    else
+      for n, dn in pairs(names) do
+        if not allowNames[n] then cache:expungeByName(dn, DNSQType.ANY, true) end
+      end
+      for n, dn in pairs(allowNames) do
+        if not names[n] then cache:expungeByName(dn, DNSQType.ANY, true) end
+      end
+    end
+  end
+  allowSMN, allowNMG, allowNames, allowMasks, allowIPs = smn, nmg, names, masks, ni
+  return string.format("allowlist: %d domains, %d ips, %d invalid", nd, ni, bad)
+end
+dnsjosAllowReload()
+
+-- A fresh TagRule per rule: dnsdist counts matches on the selector object, so a
+-- shared one would make every rule's hit counter the sum of all of them.
+local function blocked() return TagRule("dnsjos", "blocked") end
 addAction(KeyValueStoreLookupRule(kvs, KeyValueLookupKeySuffix(0, true)), SetTagAction("dnsjos", "blocked"), {name = "dnsjos-blocklist"})
+addAction(AndRule({blocked(), LuaRule(function(dq) return allowSMN:check(dq.qname) end)}), SetTagAction("dnsjos", "allowed"), {name = "dnsjos-allowlist"})
 addAction(blocked(), LuaAction(function() incMetric("dnsjos-blocked") return DNSAction.None, "" end), {name = "dnsjos-blocked-count"})
 `)
 	if b.LogBlocked {
@@ -110,7 +172,7 @@ local BLOCKPAGE4 = %s
     local rd = pos + 10
     if rtype == 1 and rdlen == 4 and rd + 3 <= #p then
       at[#at + 1] = rd
-      if #at <= %d then
+      if #at <= %d and (allowIPs == 0 or not allowNMG:match(newCA(string.format("%%d.%%d.%%d.%%d", p:byte(rd, rd + 3))))) then
         local key = {}
         for i = 0, 3 do
           local o = tostring(p:byte(rd + i))
@@ -126,7 +188,7 @@ local BLOCKPAGE4 = %s
 end), {name = "dnsjos-response-ip-scan"})
 -- rdata offsets are 1-based; the TTL sits 6 bytes before the rdata, rdlength 2 before.
 local function ripRewrite(dr)
-  if dr:getTag("dnsjos") == "ipblocked" then return DNSResponseAction.None, "" end
+  if dr:getTag("dnsjos") == "ipblocked" or allowSMN:check(dr.qname) then return DNSResponseAction.None, "" end
   local p = dr:getContent()
   local out, last = {}, 1
   for rd in dr:getTag("dnsjos-ripat"):gmatch("%%d+") do
@@ -256,19 +318,9 @@ declareMetric("cgk-rewrite-ranges", "gauge", "Cloudflare ranges currently rewrit
 
 -- A missing file means "use the fallback"; for the rewrite ranges an existing
 -- but empty file means "rewrite nothing" (every pool is already served by CGK).
-local function readList(path, fallback, allowEmpty)
-  local f = io.open(path, "r")
-  if not f then return fallback end
-  local t = {}
-  for line in f:lines() do
-    line = line:gsub("#.*", ""):match("^%s*(.-)%s*$")
-    if line ~= "" then t[#t + 1] = line end
-  end
-  f:close()
-  if #t == 0 and not allowEmpty then return fallback end
-  return t
-end
-
+`)
+	s.WriteString(readListLua)
+	s.WriteString(`
 local rewriteNMG, aliasBytes = newNMG(), {}
 
 -- (Re)load both lists; called by the agent over the console: cgkReload()

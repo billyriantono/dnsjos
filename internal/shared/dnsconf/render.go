@@ -34,6 +34,9 @@ const (
 	// Owned by the agent's CGK prober, never rendered.
 	FileCGKAliases = "dnsjos/cgk-aliases.txt"
 	FileCGKRewrite = "dnsjos/cgk-rewrite.txt"
+	// Owned by the agent's allowlist sync, never rendered.
+	FileAllowDomains = "dnsjos/allowlist-domains.txt"
+	FileAllowIPs     = "dnsjos/allowlist-ips.txt"
 )
 
 // Render returns every file for rt.BaseDir, keyed by path relative to it.

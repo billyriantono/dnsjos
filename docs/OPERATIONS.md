@@ -103,6 +103,44 @@ systemctl disable dnsjos-agent
 
 Later config changes keep the last five managed-file backups in `/var/lib/dnsjos/backup/`.
 
+## Emergency unblock (allowlist)
+
+When the regulator's list contains something shared — a CDN hostname such as
+`cdn.example.net` or an address like `192.0.2.10` — every site behind it breaks. Unblock it
+without waiting for a new list:
+
+1. Confirm the match: Blocklist → lookup the name (or IP). It shows which list entry matched
+   (`match`, e.g. the parent `example.net`).
+2. Blocklist → Allowlist → **Allow**: kind `domain` (the name and everything below it) or
+   `ip` (address or CIDR), a reason (ticket/incident id) and, when the list is expected to be
+   corrected, an expiry. Allow the narrowest name that fixes the outage — allowing
+   `example.net` also unblocks every other `*.example.net` on the list. Or with the API:
+
+   ```sh
+   curl -b jar -H 'X-Requested-With: dnsjos' -H 'Content-Type: application/json' \
+     -d '{"kind":"domain","value":"cdn.example.net","reason":"INC-123 shared CDN"}' \
+     https://panel.example/api/v1/allowlist
+   ```
+
+3. Within ~15 s every online node has it (next heartbeat → allowlist fetch →
+   `dnsjosAllowReload()`, cached blockpage answers are flushed; no dnsdist restart). Check:
+
+   ```sh
+   dig @NODE cdn.example.net +short          # the real address, not the blockpage
+   journalctl -u dnsjos-agent | grep 'allowlist applied'
+   ```
+
+   The lookup now shows "allowed" (and still "blocked" until the next build drops the entry
+   from the CDB — expected). Nodes whose agent predates the allowlist ignore it until
+   upgraded; a node that is offline applies it when it reconnects.
+
+4. Remove the entry (or let it expire) once the list is fixed. Nodes re-block names still in
+   their CDB within ~15 s; names an earlier build already left out come back with the next
+   build — run **Build now** to re-block immediately. Every add/remove is in the audit log.
+
+`whitelist` blocklist sources still work for permanent, reviewed exceptions; they only take
+effect with the next build.
+
 ## Files on a node
 
 | Path | What |
@@ -110,6 +148,7 @@ Later config changes keep the last five managed-file backups in `/var/lib/dnsjos
 | `/etc/dnsjos/agent.json` | panel URL, node id, node token (0600) |
 | `/var/lib/dnsjos/secrets.json` | console key, webserver password + API key (0600) |
 | `/var/lib/dnsjos/blocklist/current.cdb` | blocklist read by dnsdist |
+| `/etc/dnsdist/dnsjos/allowlist-domains.txt`, `allowlist-ips.txt` | allowlist written by the agent (SPEC §7.5); reloaded with `dnsjosAllowReload()` |
 | `/var/lib/dnsjos/blocked-spool/` | blocked-query batches not yet accepted by the panel |
 | `/var/lib/dnsjos/pre-adopt-<ts>.tar.gz` | `/etc/dnsdist` before the first dnsjos apply |
 | `/etc/dnsdist/dnsdist.conf`, `/etc/dnsdist/dnsjos/*.lua` | rendered by the agent — do not edit |

@@ -33,6 +33,7 @@ func Register(r *app.Router, d *app.Deps) {
 		error = 'interrupted (panel restarted)' WHERE status = 'running'`)
 	// The interval setting is re-read on every tick.
 	d.Jobs.Every("blocklist-build", time.Minute, s.tick)
+	d.Jobs.Every("allowlist-purge", time.Hour, s.purgeAllow)
 }
 
 func (s *Service) routes(r *app.Router) {
@@ -45,6 +46,10 @@ func (s *Service) routes(r *app.Router) {
 	r.Viewer("GET /api/v1/blocklist/current", s.current)
 	r.Viewer("GET /api/v1/blocklist/lookup", s.lookup)
 	r.Agent("GET /agent/v1/blocklist", s.serveCDB)
+	r.Viewer("GET /api/v1/allowlist", s.listAllow)
+	r.Admin("POST /api/v1/allowlist", s.createAllow)
+	r.Admin("DELETE /api/v1/allowlist/{id}", s.deleteAllow)
+	r.Agent("GET /agent/v1/allowlist", s.serveAllowlist)
 }
 
 const sourceCols = `id, name, kind, url, content, enabled, etag, last_modified, last_fetch_at,
@@ -216,11 +221,13 @@ func (s *Service) lookup(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
-	if b == nil {
-		httpx.WriteJSON(w, http.StatusOK, api.BlocklistLookup{Name: q})
-		return
+	res := api.BlocklistLookup{Name: q}
+	if b != nil {
+		res, err = lookupCDB(s.artifact(b.SHA256), q)
 	}
-	res, err := lookupCDB(s.artifact(b.SHA256), q)
+	if err == nil {
+		err = allowMatch(r.Context(), s.d.Pool, &res)
+	}
 	if errors.Is(err, errBadName) {
 		httpx.BadRequest(w, err.Error())
 		return

@@ -121,6 +121,10 @@ req 200 admin PUT /api/v1/settings '{"analytics_retention_days":400}'
 req 400 admin PUT /api/v1/settings '{"analytics_retention_days":0}'
 req 400 admin PUT /api/v1/settings '{"public_url":"javascript:alert(1)"}'
 req 400 admin PUT /api/v1/settings 'nope'
+req 400 admin PUT /api/v1/settings '{"blocklist_download_segments":0}'
+req 400 admin PUT /api/v1/settings '{"blocklist_download_segments":17}'
+req 200 admin PUT /api/v1/settings '{"blocklist_download_segments":4}'
+[ "$(j .blocklist_download_segments)" = 4 ] || { FAILS=$((FAILS + 1)); echo "FAIL download segments setting: $(cat "$TMP/body")"; }
 
 # ── overview & metrics ──
 req 200 viewer GET /api/v1/overview
@@ -200,6 +204,7 @@ req 401 none GET /agent/v1/config
 req 401 nope-token GET /agent/v1/config
 req 200 "$NTOK" GET /agent/v1/config
 ETAG=$(jq -r .version "$TMP/body")
+[ "$(j '.allowlist_version | length')" = 16 ] || { FAILS=$((FAILS + 1)); echo "FAIL config allowlist_version: $(j .allowlist_version)"; }
 req 304 "$NTOK" GET /agent/v1/config '' -H "If-None-Match: \"$ETAG\""
 req 409 "$ATOK" GET /agent/v1/config
 req 404 "$NTOK" GET /agent/v1/blocklist
@@ -209,6 +214,7 @@ HB='{"time":"2026-09-27T00:00:00Z","agent_version":"1","dnsdist_running":true,"a
  "dynblocks":[{"client":"192.0.2.1/32","reason":"rate","stage":"blocked","blocks":3}]}'
 req 200 "$NTOK" POST /agent/v1/heartbeat "$HB"
 req 200 "$NTOK" POST /agent/v1/heartbeat "${HB/00:00:00Z/00:00:10Z}"
+[ "$(j '.allowlist_version | length')" = 16 ] || { FAILS=$((FAILS + 1)); echo "FAIL heartbeat allowlist_version: $(cat "$TMP/body")"; }
 req 200 "$ATOK" POST /agent/v1/heartbeat "$HB"
 req 200 "$ATOK" GET /agent/v1/config
 req 204 "$NTOK" POST /agent/v1/blocked '{"items":[{"day":"2026-09-26","qname":"bad.example","qtype":"A","count":3}]}'
@@ -344,6 +350,33 @@ req 200 "$NTOK" GET /agent/v1/blocklist
 req 206 "$NTOK" GET /agent/v1/blocklist '' -H 'Range: bytes=0-9'
 SHA=$(curl -s -H "Authorization: Bearer $NTOK" -D - -o /dev/null "$B/agent/v1/blocklist" | tr -d '\r' | awk -F': ' 'tolower($1)=="etag"{print $2}')
 req 304 "$NTOK" GET /agent/v1/blocklist '' -H "If-None-Match: $SHA"
+
+# ── allowlist (SPEC §7.5) ──
+req 200 viewer GET /api/v1/allowlist
+req 403 viewer POST /api/v1/allowlist '{"kind":"domain","value":"bad.example"}'
+req 400 admin POST /api/v1/allowlist 'garbage'
+req 422 admin POST /api/v1/allowlist '{"kind":"domain","value":"example"}'
+req 422 admin POST /api/v1/allowlist '{"kind":"ip","value":"0.0.0.0/0"}'
+req 422 admin POST /api/v1/allowlist '{"kind":"cdn","value":"bad.example"}'
+req 422 admin POST /api/v1/allowlist '{"kind":"domain","value":"x.example","expires_at":"2020-01-01T00:00:00Z"}'
+req 201 admin POST /api/v1/allowlist '{"kind":"domain","value":"Bad.Example.","reason":"shared CDN"}'
+ALLOW=$(j .id)
+[ "$(j .value)" = bad.example ] || { FAILS=$((FAILS + 1)); echo "FAIL allowlist value: $(cat "$TMP/body")"; }
+req 409 admin POST /api/v1/allowlist '{"kind":"domain","value":"bad.example"}'
+req 201 admin POST /api/v1/allowlist '{"kind":"ip","value":"192.0.2.0/24","expires_at":"2099-01-01T00:00:00Z"}'
+req 200 viewer GET '/api/v1/blocklist/lookup?name=www.bad.example'
+[ "$(j '.blocked, .allowed, .allow_entry.value' | paste -sd, -)" = true,true,bad.example ] ||
+	{ FAILS=$((FAILS + 1)); echo "FAIL lookup allowed: $(cat "$TMP/body")"; }
+req 401 none GET /agent/v1/allowlist
+req 200 "$NTOK" GET /agent/v1/allowlist
+AV=$(j .version)
+[ "$(j '.domains, .ips | join(",")' | paste -sd' ' -)" = "bad.example 192.0.2.0/24" ] || { FAILS=$((FAILS + 1)); echo "FAIL agent allowlist: $(cat "$TMP/body")"; }
+req 304 "$NTOK" GET /agent/v1/allowlist '' -H "If-None-Match: \"$AV\""
+req 403 viewer DELETE "/api/v1/allowlist/$ALLOW"
+req 204 admin DELETE "/api/v1/allowlist/$ALLOW"
+req 404 admin DELETE "/api/v1/allowlist/$ALLOW"
+req 404 admin DELETE /api/v1/allowlist/not-a-uuid
+req 200 "$NTOK" GET /agent/v1/allowlist '' -H "If-None-Match: \"$AV\""
 req 204 admin DELETE "/api/v1/blocklist/sources/$SRC"
 req 404 admin DELETE "/api/v1/blocklist/sources/$SRC"
 

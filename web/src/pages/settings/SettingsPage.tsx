@@ -21,7 +21,7 @@ type NumKey = Exclude<keyof Settings, 'public_url'>
 const sections: { title: string; description: string; fields: { key: NumKey; label: string; unit: string; min: number; max: number; hint: (v: number) => string }[] }[] = [
   {
     title: 'Blocklist',
-    description: 'How often the panel re-fetches sources and rebuilds the CDB.',
+    description: 'How often and how the panel re-fetches sources and rebuilds the CDB.',
     fields: [
       {
         key: 'blocklist_build_interval_minutes',
@@ -29,6 +29,13 @@ const sections: { title: string; description: string; fields: { key: NumKey; lab
         unit: 'minutes',
         ...SETTINGS_BOUNDS.blocklist_build_interval_minutes,
         hint: (v) => `Every ${fmtDuration(v * 60)}. Unchanged sources produce a skipped build.`,
+      },
+      {
+        key: 'blocklist_download_segments',
+        label: 'Blocklist download segments',
+        unit: 'streams',
+        ...SETTINGS_BOUNDS.blocklist_download_segments,
+        hint: () => 'Parallel byte-range download from Komdigi; 1 = single stream.',
       },
     ],
   },

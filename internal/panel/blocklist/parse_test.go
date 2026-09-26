@@ -83,7 +83,7 @@ func writeTmp(t testing.TB, inputs []input, wl map[string]struct{}) (string, sta
 		t.Fatal(err)
 	}
 	defer f.Close()
-	st, err := writeCDB(context.Background(), f, inputs, wl)
+	st, err := writeCDB(context.Background(), f, inputs, wl, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

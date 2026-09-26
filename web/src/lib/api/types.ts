@@ -538,6 +538,27 @@ export interface BlocklistLookup {
   name: string
   blocked: boolean
   match: string // the entry that matched (the name itself or a parent)
+  /** An active allowlist entry covers the name/IP; blocked may still be true until the next build. */
+  allowed: boolean
+  allow_entry: AllowEntry | null
+}
+
+/** SPEC §7.5: names/IPs never blocked (list mistakes such as shared CDN space). */
+export type AllowKind = 'domain' | 'ip'
+export interface AllowEntry {
+  id: string
+  kind: AllowKind
+  value: string // normalized: lowercase name without trailing dot, or an address / masked CIDR
+  reason: string
+  created_by_email: string
+  created_at: string
+  expires_at: string | null // null = permanent
+}
+export interface AllowEntryCreate {
+  kind: AllowKind
+  value: string
+  reason: string
+  expires_at?: string // RFC 3339, must be in the future
 }
 
 export interface BlockedReportQuery {
@@ -649,6 +670,7 @@ export interface Settings {
   agent_poll_interval_s: number
   agent_heartbeat_interval_s: number
   public_url: string
+  blocklist_download_segments: number // 1..16 parallel byte ranges per large download; 1 = single stream
 }
 
 export interface Overview {

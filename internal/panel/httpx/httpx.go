@@ -64,6 +64,17 @@ func ReadJSON(r *http.Request, dst any, maxBytes int64) error {
 	return nil
 }
 
+// ETagMatch reports whether an If-None-Match header matches etag (weak comparison).
+func ETagMatch(header, etag string) bool {
+	for _, t := range strings.Split(header, ",") {
+		t = strings.TrimPrefix(strings.TrimSpace(t), "W/")
+		if t == etag || t == "*" {
+			return true
+		}
+	}
+	return false
+}
+
 // ClientIP returns the peer address; X-Forwarded-For is trusted only from a loopback
 // peer (the local reverse proxy).
 func ClientIP(r *http.Request) string {

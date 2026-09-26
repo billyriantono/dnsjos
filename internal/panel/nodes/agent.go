@@ -12,6 +12,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/billyriantono/dnsjos/internal/panel/app"
+	"github.com/billyriantono/dnsjos/internal/panel/blocklist"
 	"github.com/billyriantono/dnsjos/internal/panel/db"
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
@@ -41,16 +42,6 @@ func effectiveConfig(ctx context.Context, q db.Querier, nodeID string) (e effect
 	}
 	e.version = configVersion(v, key, e.over)
 	return e, err == nil, err
-}
-
-func etagMatch(header string, etag string) bool {
-	for _, t := range strings.Split(header, ",") {
-		t = strings.TrimPrefix(strings.TrimSpace(t), "W/")
-		if t == etag || t == "*" {
-			return true
-		}
-	}
-	return false
 }
 
 func (s *svc) config(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +76,7 @@ func (s *svc) config(w http.ResponseWriter, r *http.Request) {
 	etag := `"` + strconv.Itoa(e.version) + `"`
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Cache-Control", "no-cache")
-	if etagMatch(r.Header.Get("If-None-Match"), etag) {
+	if httpx.ETagMatch(r.Header.Get("If-None-Match"), etag) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
@@ -103,8 +94,13 @@ func (s *svc) config(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusConflict, "invalid_config", "effective config is invalid: "+err.Error())
 		return
 	}
+	al, err := blocklist.ActiveAllowlist(ctx, s.d.Pool)
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
 	set := s.d.Settings.Get()
-	out := api.AgentConfig{
+	out := api.AgentConfig{AllowlistVersion: al.Version,
 		Version: e.version, Spec: spec, Profile: e.profile,
 		PollIntervalS: set.AgentPollIntervalS, HeartbeatIntervalS: set.AgentHeartbeatIntervalS,
 	}
@@ -299,7 +295,11 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 		if ok {
 			ack.ConfigVersion = e.version
 		}
-		ack.BlocklistSHA256, _, err = currentBuild(ctx, tx)
+		if ack.BlocklistSHA256, _, err = currentBuild(ctx, tx); err != nil {
+			return err
+		}
+		al, err := blocklist.ActiveAllowlist(ctx, tx)
+		ack.AllowlistVersion = al.Version
 		return err
 	})
 	if err != nil {
