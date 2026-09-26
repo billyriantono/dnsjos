@@ -110,6 +110,9 @@ func (e *env) node(name, dnsdist string, hourQueries int) string {
 func (e *env) heartbeat(id, status, dnsdist, agent string, last *api.UpgradeResult) {
 	e.run(`UPDATE nodes SET status = $2, dnsdist_version = $3, agent_version = $4, last_upgrade = $5, last_seen_at = $6
 		WHERE id = $1`, id, status, dnsdist, agent, last, e.now)
+	// the agent received and acked its commands
+	e.run(`UPDATE node_commands SET delivered_at = coalesce(delivered_at, $2), acked_at = coalesce(acked_at, $2)
+		WHERE node_id = $1`, id, e.now)
 }
 
 func (e *env) get(id int64) api.UpgradeRun {
@@ -237,6 +240,12 @@ func TestRollingDnsdist(t *testing.T) {
 	e.call(404, "POST", "/api/v1/upgrades/999/pause", nil, nil)
 	e.call(404, "GET", "/api/v1/upgrades/x", nil, nil)
 
+	// ns-a still has the aborted run's command queued: it counts as upgrading until a heartbeat
+	if eb := e.call(409, "POST", "/api/v1/upgrades", api.UpgradeRunCreate{Kind: api.UpgradeAgent, NodeIDs: []string{a}}, nil); !strings.Contains(eb.Error.Message, "ns-a (upgrading)") {
+		t.Fatalf("queued command: %+v", eb)
+	}
+	e.heartbeat(a, "online", "2.0.0-1", "1.0", nil)
+
 	// agent run on an explicit node list, target defaults to the embedded agent
 	var ar api.UpgradeRun
 	e.call(201, "POST", "/api/v1/upgrades", api.UpgradeRunCreate{Kind: api.UpgradeAgent, NodeIDs: []string{a}}, &ar)
@@ -287,5 +296,39 @@ func TestPausesWhenFleetUnhealthy(t *testing.T) {
 	e.scalar("SELECT count(*) FROM node_commands WHERE node_id = $1", &n, b)
 	if n != 0 {
 		t.Fatalf("ns-b got %d commands", n)
+	}
+}
+
+// SPEC §18: a rolling run never upgrades a node while another one runs a manual upgrade —
+// queued, delivered without a heartbeat since, or reported as upgrade_in_progress.
+func TestRunWaitsForManualUpgrade(t *testing.T) {
+	e := setup(t)
+	a := e.node("ns-a", "2.0.0-1", 0)
+	b := e.node("ns-b", "2.0.0-1", 10)
+	create := func(want int) api.ErrorBody {
+		return e.call(want, "POST", "/api/v1/upgrades", api.UpgradeRunCreate{Kind: api.UpgradeDnsdist, TargetVersion: "2.0.1-1", NodeIDs: []string{b}}, nil)
+	}
+
+	e.run(`INSERT INTO node_commands (node_id, type, params) VALUES ($1, 'upgrade_dnsdist', '{"version":"2.0.1-1"}')`, a)
+	if eb := create(409); !strings.Contains(eb.Error.Message, "ns-a (upgrading)") {
+		t.Fatalf("queued manual upgrade: %+v", eb)
+	}
+	e.run("UPDATE node_commands SET delivered_at = $2 WHERE node_id = $1", a, e.now)
+	create(409) // delivered, no heartbeat since
+	e.now = e.now.Add(15 * time.Second)
+	e.run(`UPDATE nodes SET last_seen_at = $2, last_heartbeat = '{"upgrade_in_progress": true}' WHERE id = $1`, a, e.now)
+	e.run("UPDATE node_commands SET acked_at = $2 WHERE node_id = $1", a, e.now)
+	create(409) // the agent reports it is upgrading
+	e.run(`UPDATE nodes SET last_heartbeat = '{"upgrade_in_progress": false}' WHERE id = $1`, a)
+
+	// Created while idle, then a manual upgrade is queued before the first tick: pause.
+	var u api.UpgradeRun
+	e.call(201, "POST", "/api/v1/upgrades", api.UpgradeRunCreate{Kind: api.UpgradeDnsdist, TargetVersion: "2.0.1-1", NodeIDs: []string{b}}, &u)
+	e.run(`INSERT INTO node_commands (node_id, type, params) VALUES ($1, 'upgrade_dnsdist', '{"version":"2.0.1-1"}')`, a)
+	e.tick()
+	var n int
+	e.scalar("SELECT count(*) FROM node_commands WHERE node_id = $1", &n, b)
+	if u = e.get(u.ID); n != 0 || u.Status != api.RunPaused || !strings.Contains(u.Message, "ns-a (upgrading)") {
+		t.Fatalf("run started ns-b while ns-a upgrades: %d commands, %s %q", n, statuses(u), u.Message)
 	}
 }

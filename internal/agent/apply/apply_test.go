@@ -227,3 +227,79 @@ func TestPreAdoptSnapshot(t *testing.T) {
 		t.Fatalf("snapshots: %v", snaps())
 	}
 }
+
+// TestApplyRollbackSurvivesCancel: the agent being stopped mid-verify must not leave
+// the old files on disk with dnsdist never restarted onto them.
+func TestApplyRollbackSurvivesCancel(t *testing.T) {
+	a, log := setup(t, true)
+	os.MkdirAll(a.Dir, 0o755)
+	os.WriteFile(a.Conf(), []byte("-- packaged dnsdist.conf\n"), 0o640)
+	ctx, cancel := context.WithCancel(context.Background())
+	time.AfterFunc(500*time.Millisecond, cancel)
+	_, err := a.Apply(ctx, spec("-- CONSOLEFAIL"), rt(a.Dir), false)
+	if err == nil || !strings.Contains(err.Error(), "rolled back") || strings.Contains(err.Error(), "canceled") {
+		t.Fatalf("want a completed rollback, got %v", err)
+	}
+	if read(t, a.Conf()) != "-- packaged dnsdist.conf\n" {
+		t.Fatal("old config not restored")
+	}
+	calls := read(t, log)
+	if i := strings.LastIndex(calls, "showVersion()"); i < 0 || !strings.Contains(calls[:i], "showVersion()") {
+		t.Fatalf("console not verified after the rollback:\n%s", calls)
+	}
+	// already cancelled: nothing is touched
+	if _, err := a.Apply(ctx, spec("-- v2"), rt(a.Dir), false); err == nil || read(t, a.Conf()) != "-- packaged dnsdist.conf\n" {
+		t.Fatalf("cancelled apply swapped: %v", err)
+	}
+}
+
+// TestSwapWritesConfLast: a swap cut short (disk full) must not leave the new conf
+// dofile()ing modules that were never written.
+func TestSwapWritesConfLast(t *testing.T) {
+	a, _ := setup(t, false)
+	os.MkdirAll(filepath.Join(a.Dir, dnsconf.FileAbuse+".dnsjos-tmp"), 0o755) // makes the module write fail
+	os.WriteFile(a.Conf(), []byte("-- old\n"), 0o640)
+	files := map[string][]byte{dnsconf.FileConf: []byte("-- new\n"), dnsconf.FileAbuse: []byte("-- abuse\n")}
+	if err := a.swap(files, 0o640, -1); err == nil {
+		t.Fatal("swap should fail")
+	}
+	if read(t, a.Conf()) != "-- old\n" {
+		t.Fatal("conf swapped before its modules")
+	}
+}
+
+// TestRestoreSnapshotSkipsUntouched: rolling back to the pre-adopt snapshot rewrites
+// only what changed, so it does not need free space for the (large) CDB again.
+func TestRestoreSnapshotSkipsUntouched(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "db"), 0o755)
+	os.WriteFile(filepath.Join(dir, "db/blacklist.db"), []byte("cdb"), 0o640)
+	os.WriteFile(filepath.Join(dir, dnsconf.FileConf), []byte("-- ootb\n"), 0o640)
+	snap := filepath.Join(t.TempDir(), "s.tar.gz")
+	if err := snapshot(dir, snap); err != nil {
+		t.Fatal(err)
+	}
+	before, _ := os.Stat(filepath.Join(dir, "db/blacklist.db"))
+	os.WriteFile(filepath.Join(dir, dnsconf.FileConf), []byte("-- new\n"), 0o640)
+	if err := restoreSnapshot(dir, snap); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := os.Stat(filepath.Join(dir, "db/blacklist.db"))
+	if !os.SameFile(before, after) {
+		t.Fatal("untouched file rewritten")
+	}
+	if read(t, filepath.Join(dir, dnsconf.FileConf)) != "-- ootb\n" {
+		t.Fatal("conf not restored")
+	}
+}
+
+func TestPickOwner(t *testing.T) {
+	for _, c := range []struct {
+		dnsdist, conf, gid int
+		mode               os.FileMode
+	}{{110, 0, 110, 0o640}, {110, 50, 110, 0o640}, {-1, 50, 50, 0o640}, {-1, 0, -1, 0o644}, {-1, -1, -1, 0o644}} {
+		if gid, mode := pickOwner(c.dnsdist, c.conf); gid != c.gid || mode != c.mode {
+			t.Errorf("pickOwner(%d, %d) = %d %v", c.dnsdist, c.conf, gid, mode)
+		}
+	}
+}

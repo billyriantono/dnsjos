@@ -269,8 +269,17 @@ Rendering rules (must be byte-for-byte deterministic for the same input):
      TXT → `SpoofRawAction` (txt), SOA/NS → raw SOA/NS, **every other qtype → NODATA**
      (`RCodeAction(DNSRCode.NOERROR)`), matching the production behaviour that blocks
      HTTPS/SVCB lookups.
-   * If `block_response_ips`: response Lua rule that rewrites every A record whose IP key
-     (see §7.3) is in the KVS to `blockpage_ipv4` (same-length in-place rewrite), and logs it.
+   * If `block_response_ips`: response Lua rules that, when **any** A record's IP key
+     (see §7.3) is in the KVS, rewrite **every** A record of the answer to
+     `blockpage_ipv4` with TTL 60 (same-length in-place rewrite, so the client never gets
+     a mix of blockpage and real addresses), count it once in
+     `dnsjos-response-ip-blocked`, log it, and mark it `SetSkipCacheResponseAction()` so
+     every blocked answer is counted/logged and CDB updates apply immediately. Only A
+     answers are checked (the IP list is IPv4-only). This is a behaviour change from the
+     legacy production rules, whose IP match never altered answers: adoption must keep it
+     off unless the operator opts in.
+   * Every rule gets its own selector object (dnsdist counts hits on the selector, so a
+     shared `TagRule` inflates every rule that uses it).
 10. Abuse (abuse.lua): `MaxQPSIPRule(per_client_qps, 32, 64, burst)` → `DropAction()`
     excluding `trusted` (**MaxQPSIPRule matches clients OVER the rate — never wrap it in
     NotRule**), moved to top with `mvRuleToTop()`; `dynBlockRulesGroup()` with
@@ -281,6 +290,12 @@ Rendering rules (must be byte-for-byte deterministic for the same input):
     metrics `cgk-rewrites`, `cgk-aliases`, `cgk-rewrite-ranges`, global `cgkReload()`.
 12. `extra_lua` appended verbatim at the end, fenced by comments.
 13. Custom metrics: `declareMetric` for dnsjos counters.
+14. Rule names are unique (dnsdist exports `dnsdist_rule_hits{id=<name>}`; duplicates
+    break the Prometheus exposition) and stable for dashboards: the legacy names
+    `per-client-qps-cap` (abuse cap) and `cloudflare-cgk` (CGK rewrite) are kept; the
+    analytics stream uses `dnsjos-analytics-response` / `-cachehit` / `-self`. Upstream
+    `name=` is emitted only when set; it becomes the Prometheus `server` label (unnamed
+    servers are labelled `ip:port`, as before adoption).
 
 The renderer has golden-file tests (`testdata/*.golden`) for: defaults, DoH+DoT, abuse
 off, cgk off, multiple upstreams with weights, extra_lua.
@@ -744,7 +759,8 @@ Types live in `internal/shared/api/analytics.go`.
   summed per key; `sampled` ORed from `sample_rate > 1`) and `analytics_top_daily(day,
   node_id, kind, name, count, error, pk(day,node_id,kind,name))` (upsert-add count and
   error), index `(day, kind, count desc)`. A daily job trims each (day, node, kind) to the
-  top 1000 once the day is over. Retention: setting `analytics_retention_days` (default
+  node's top 1000 plus any name in the fleet's top 1000 for that (day, kind) once the
+  day is over. Retention: setting `analytics_retention_days` (default
   400, in `api.Settings`).
 * **API** (§10): `GET /api/v1/analytics` → `api.AnalyticsReport` — `by_day` has every day
   of the range (zeros included); `top[]` = `{rank (1-based), name, count, share,

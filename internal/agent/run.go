@@ -47,8 +47,9 @@ type agent struct {
 	anSp  *dnstap.Spool[api.AnalyticsBatch]
 	host  string
 	os    string
-	opMu  sync.Mutex // serialises apply, restarts and dnsdist upgrades
-	aptMu sync.Mutex // one apt/dpkg operation at a time
+	opMu  sync.Mutex     // serialises apply, restarts and dnsdist upgrades
+	aptMu sync.Mutex     // one apt/dpkg operation at a time
+	ops   sync.WaitGroup // command goroutines (restart, upgrades); Run waits for them
 	run   Runner
 	stop  context.CancelCauseFunc
 	start time.Time
@@ -92,6 +93,7 @@ func Run(ctx context.Context, o Options) error {
 		go func() { defer wg.Done(); f(ctx) }()
 	}
 	wg.Wait()
+	a.ops.Wait() // never exit mid-dpkg or mid-restart
 	if err := context.Cause(ctx); errors.Is(err, ErrRestart) {
 		return err
 	}
@@ -384,27 +386,29 @@ func (a *agent) command(ctx context.Context, c api.Command) {
 	case api.CmdReapply:
 		poke(a.forceNow)
 	case api.CmdRestartDnsdist:
-		go func() {
+		a.ops.Go(func() {
 			a.opMu.Lock()
 			defer a.opMu.Unlock()
 			if err := a.app.Restart(ctx); err != nil {
 				a.o.Log.Error("restart dnsdist failed", "err", err)
 			}
-		}()
+		})
 	case api.CmdCheckUpdates:
 		poke(a.invNow)
 	case api.CmdUpgradeDnsdist:
-		go a.upgrade(func() *api.UpgradeResult { return a.upgradeDnsdist(ctx, c.Version) })
+		a.ops.Go(func() { a.upgrade(func() *api.UpgradeResult { return a.upgradeDnsdist(ctx, c.Version) }) })
 	case api.CmdUpgradeAgent:
-		go a.upgrade(func() *api.UpgradeResult { return a.upgradeAgent(ctx) })
+		a.ops.Go(func() { a.upgrade(func() *api.UpgradeResult { return a.upgradeAgent(ctx) }) })
 	case api.CmdSetDnsdistSeries:
-		go a.upgrade(func() *api.UpgradeResult {
-			from, err := a.setSeries(ctx, c.Series)
-			res := &api.UpgradeResult{Kind: api.UpgradeSeries, From: from, To: c.Series, OK: err == nil, At: time.Now().UTC()}
-			if err != nil {
-				res.Error = err.Error()
-			}
-			return res
+		a.ops.Go(func() {
+			a.upgrade(func() *api.UpgradeResult {
+				from, err := a.setSeries(ctx, c.Series)
+				res := &api.UpgradeResult{Kind: api.UpgradeSeries, From: from, To: c.Series, OK: err == nil, At: time.Now().UTC()}
+				if err != nil {
+					res.Error = err.Error()
+				}
+				return res
+			})
 		})
 	default:
 		a.o.Log.Warn("unknown command", "type", c.Type)

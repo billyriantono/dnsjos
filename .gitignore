@@ -14,6 +14,9 @@ coverage.out
 /web/dist/
 /web/.vite/
 
+logo_*.png
+
+
 # local env / data
 .env
 .env.*

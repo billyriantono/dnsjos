@@ -1,5 +1,5 @@
-import { useQuery } from '@tanstack/react-query'
-import { useState, type FormEvent, type ReactNode } from 'react'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import { LuHammer, LuPencil, LuPlus, LuSearch, LuShieldBan, LuShieldCheck, LuTrash2 } from 'react-icons/lu'
 import { toast } from 'sonner'
 
@@ -62,6 +62,14 @@ function useBuildState() {
     queryFn: api.blocklist.current,
     refetchInterval: running ? 2_000 : 10_000,
   })
+  // A build rewrites each source's entries / last fetch / status. Refetch sources whenever the newest build
+  // changes id or status; keying on `running` alone misses builds that finish between two 10 s polls.
+  const qc = useQueryClient()
+  const newest = builds.data?.items[0]
+  const newestKey = newest && `${newest.id}:${newest.status}`
+  useEffect(() => {
+    if (newestKey) void qc.invalidateQueries({ queryKey: qk.blocklistSources })
+  }, [qc, newestKey])
   return { builds, current, running }
 }
 

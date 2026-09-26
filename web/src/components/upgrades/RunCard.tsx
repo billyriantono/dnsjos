@@ -5,6 +5,7 @@ import { toast } from 'sonner'
 
 import { useAuth } from '@/app/auth'
 import { ConfirmDialog } from '@/components/ConfirmDialog'
+import { UserName } from '@/components/UserName'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TimeAgo } from '@/components/TimeAgo'
 import { toastError } from '@/components/ops/toast'
@@ -83,7 +84,12 @@ export function RunCard({ id }: { id: number }) {
         </CardTitle>
         <CardDescription>
           started <TimeAgo date={run.created_at} />
-          {run.created_by && ` by ${run.created_by}`}
+          {run.created_by && (
+            <>
+              {' '}
+              by <UserName id={run.created_by} />
+            </>
+          )}
           {run.finished_at && (
             <>
               {' '}

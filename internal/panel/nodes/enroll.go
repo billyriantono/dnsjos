@@ -125,8 +125,17 @@ func nameFromHostname(h string) string {
 
 var errUnusableName = errors.New("hostname is not usable as a node name; set node_name on the enrollment token")
 
+// errNameTaken: an unscoped token (no node_name) never re-keys an existing node, or any
+// leaked token could take over a live node by claiming its hostname.
+var errNameTaken = errors.New("a node with this name already exists; to re-enroll it, create a token with node_name set to it")
+
+// errAdoptExtraLua: adopt_overrides come from an unauthenticated token holder; extra_lua
+// runs as root on the node (dnsdist --check-config), so only an admin may set it (PATCH).
+var errAdoptExtraLua = errors.New("adopt_overrides may not set tuning.extra_lua")
+
 // enroll claims a single-use enrollment token and creates the node, or re-keys the live
-// node of the same name (re-installing a machine keeps its history).
+// node of the same name (re-installing a machine keeps its history) — the latter only when
+// the token names that node.
 func (s *svc) enroll(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	var req api.EnrollRequest
@@ -154,7 +163,8 @@ func (s *svc) enroll(w http.ResponseWriter, r *http.Request) {
 			Scan(&tokID, &name, &labels, &profileID); err != nil {
 			return err
 		}
-		if name == "" {
+		scoped := name != ""
+		if !scoped {
 			name = nameFromHostname(req.Hostname)
 		}
 		if validName(name) != nil {
@@ -166,6 +176,14 @@ func (s *svc) enroll(w http.ResponseWriter, r *http.Request) {
 		over := json.RawMessage(`{}`)
 		if req.Adopt {
 			over = normalizeOverrides(req.AdoptOverrides)
+			var t struct {
+				Tuning struct {
+					ExtraLua *string `json:"extra_lua"`
+				} `json:"tuning"`
+			}
+			if json.Unmarshal(over, &t) == nil && t.Tuning.ExtraLua != nil && *t.Tuning.ExtraLua != "" {
+				return errAdoptExtraLua
+			}
 			if err := checkOverrides(ctx, tx, profileID, over); err != nil {
 				return err
 			}
@@ -185,11 +203,14 @@ func (s *svc) enroll(w http.ResponseWriter, r *http.Request) {
 				adopted = nodes.adopted OR EXCLUDED.adopted,
 				overrides = CASE WHEN EXCLUDED.adopted THEN EXCLUDED.overrides ELSE nodes.overrides END,
 				seeded_blocklist_sha256 = ''
+			WHERE $13::bool
 			RETURNING id`,
 			name, clip(req.Hostname, 253), ip, labels, profileID, app.HashToken(nodeTok),
 			clip(req.AgentVersion, 64), clip(req.DnsdistVersion, 128), clip(req.OS, 128), clip(req.Arch, 32),
-			req.Adopt, []byte(over)).
-			Scan(&nodeID); err != nil {
+			req.Adopt, []byte(over), scoped).
+			Scan(&nodeID); db.IsNotFound(err) {
+			return errNameTaken // conflict with a live node and the token is unscoped
+		} else if err != nil {
 			return err
 		}
 		if _, err := tx.Exec(ctx, "UPDATE enrollment_tokens SET used_by_node = $2 WHERE id = $1", tokID, nodeID); err != nil {
@@ -202,8 +223,11 @@ func (s *svc) enroll(w http.ResponseWriter, r *http.Request) {
 	case db.IsNotFound(err):
 		httpx.WriteError(w, http.StatusUnauthorized, "invalid_token", "enrollment token is invalid, expired or already used")
 		return
-	case errors.Is(err, errUnusableName):
+	case errors.Is(err, errUnusableName), errors.Is(err, errAdoptExtraLua):
 		httpx.BadRequest(w, err.Error())
+		return
+	case errors.Is(err, errNameTaken):
+		httpx.WriteError(w, http.StatusConflict, "name_taken", err.Error())
 		return
 	case err != nil:
 		writeOverridesErr(w, r, "adopt_overrides", err)

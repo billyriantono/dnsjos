@@ -305,7 +305,7 @@ export const useAnalytics = (q: AnalyticsQuery) =>
   useQuery({ queryKey: qk.analytics(q), queryFn: () => api.analytics.report(q) })
 export const useOffenders = (q: OffendersQuery = {}) =>
   useQuery({ queryKey: qk.offenders(q), queryFn: () => api.offenders.list(q), refetchInterval: LIVE })
-export const useUsers = () => useQuery({ queryKey: qk.users, queryFn: api.users.list })
+export const useUsers = (enabled = true) => useQuery({ queryKey: qk.users, queryFn: api.users.list, enabled })
 export const useAudit = (q: AuditQuery = {}) => useQuery({ queryKey: qk.audit(q), queryFn: () => api.audit.list(q) })
 export const useSettings = () => useQuery({ queryKey: qk.settings, queryFn: api.settings.get })
 

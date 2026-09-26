@@ -158,6 +158,19 @@ func TestUpgradeDnsdist(t *testing.T) {
 	}
 }
 
+// TestCommandUpgradeIsAwaited: Run waits on a.ops, so a stopping agent never exits
+// while apt/dpkg is installing dnsdist.
+func TestCommandUpgradeIsAwaited(t *testing.T) {
+	a, _ := fakeNode(t, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	a.command(ctx, api.Command{ID: 1, Type: api.CmdUpgradeDnsdist, Version: "2.0.2-1pdns.bookworm"})
+	cancel() // SIGTERM right after the command arrived
+	a.ops.Wait()
+	if r := a.lastUp; r == nil || !r.OK {
+		t.Fatalf("upgrade not finished when ops.Wait returned: %+v", r)
+	}
+}
+
 func TestUpgradeDnsdistRollsBack(t *testing.T) {
 	a, state := fakeNode(t, "2.0.2-1pdns.bookworm")
 	r := a.upgradeDnsdist(context.Background(), "2.0.2-1pdns.bookworm")

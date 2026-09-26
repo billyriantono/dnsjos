@@ -137,8 +137,16 @@ func restoreSnapshot(dir, src string) error {
 				return err
 			}
 		case tar.TypeReg:
-			if fi, err := os.Lstat(p); err == nil && !fi.Mode().IsRegular() {
+			fi, err := os.Lstat(p)
+			if err == nil && !fi.Mode().IsRegular() {
 				os.RemoveAll(p)
+			}
+			// Files the apply never touched (the CDB under db/, …) are not rewritten: a
+			// rollback must not need free space for the whole tree. The managed files are
+			// always rewritten.
+			if err == nil && fi.Mode().IsRegular() && !slices.Contains(Managed, rel) && fi.Size() == h.Size &&
+				fi.Mode().Perm() == mode.Perm() && fi.ModTime().Round(time.Second).Equal(h.ModTime.Round(time.Second)) {
+				break
 			}
 			b, err := io.ReadAll(tr)
 			if err != nil {

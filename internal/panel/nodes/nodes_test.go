@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -556,12 +557,21 @@ func TestInstall(t *testing.T) {
 }
 
 func TestPure(t *testing.T) {
-	if configVersion(3, []byte(`{}`)) != 3 || configVersion(3, nil) != 3 {
+	if configVersion(3, "", []byte(`{}`)) != 3 || configVersion(3, "", nil) != 3 {
 		t.Error("no overrides must keep the profile version")
 	}
-	a, b := configVersion(3, []byte(`{"acl": ["1.0.0.0/8"]}`)), configVersion(3, []byte(`{"acl": ["2.0.0.0/8"]}`))
-	if a == b || a/100000 != 3 || a == configVersion(4, []byte(`{"acl": ["1.0.0.0/8"]}`)) {
+	a, b := configVersion(3, "", []byte(`{"acl": ["1.0.0.0/8"]}`)), configVersion(3, "", []byte(`{"acl": ["2.0.0.0/8"]}`))
+	if a == b || a/100000 != 3 || a == configVersion(4, "", []byte(`{"acl": ["1.0.0.0/8"]}`)) {
 		t.Errorf("override versions %d %d", a, b)
+	}
+	// same version number on another profile is another version
+	p1, p2 := configVersion(1, "p1", nil), configVersion(1, "p2", nil)
+	if p1 == 1 || p2 == 1 || p1 == p2 || p1/100000 != 1 || configVersion(1, "p1", []byte(`{"acl": ["1.0.0.0/8"]}`)) == p1 {
+		t.Errorf("profile versions %d %d", p1, p2)
+	}
+	if gapMinutes(15*time.Second) != 1 || gapMinutes(-time.Hour) != 1 || gapMinutes(61*time.Second) != 2 ||
+		gapMinutes(time.Hour) != 60 || gapMinutes(365*24*time.Hour) != maxGapMinutes {
+		t.Error("gapMinutes")
 	}
 	prev := api.Counters{Queries: 100, CacheHits: 10}
 	if d := counterDelta(&prev, api.Counters{Queries: 150, CacheHits: 12}); d.Queries != 50 || d.CacheHits != 2 {
@@ -581,5 +591,115 @@ func TestPure(t *testing.T) {
 	}
 	if !etagMatch(`W/"5", "7"`, `"7"`) || etagMatch(`"5"`, `"7"`) {
 		t.Error("etagMatch")
+	}
+}
+
+// An unscoped token (no node_name) creates a node but never re-keys a live one: otherwise
+// any leaked token takes over a node by claiming its hostname, and adopt_overrides (e.g.
+// extra_lua, run as root by check-config) would persist on it.
+func TestEnrollNoHostnameTakeover(t *testing.T) {
+	e := setup(t)
+	victim := e.enroll("edge-1")
+	unscoped := func() string {
+		var tok api.EnrollmentTokenCreated
+		e.call(201, "POST", "/api/v1/enrollment-tokens", "admin", api.EnrollmentTokenCreate{TTLHours: 1}, &tok)
+		return tok.Token
+	}
+	tok := unscoped()
+	var eb struct{ Error struct{ Code string } }
+	e.call(409, "POST", "/agent/v1/enroll", "", api.EnrollRequest{Token: tok, Hostname: "edge-1", PublicIP: "203.0.113.66"}, &eb)
+	if eb.Error.Code != "name_taken" {
+		t.Fatalf("code %q", eb.Error.Code)
+	}
+	e.call(409, "POST", "/agent/v1/enroll", "", api.EnrollRequest{Token: tok, Hostname: "edge-1", Adopt: true,
+		AdoptOverrides: json.RawMessage(`{"acl": ["0.0.0.0/0"]}`)}, nil)
+	e.call(200, "GET", "/agent/v1/config", victim.NodeToken, nil, nil) // real agent still in
+	var ip, over string
+	e.scalar("SELECT public_ip FROM nodes WHERE id = $1", &ip, victim.NodeID)
+	e.scalar("SELECT overrides::text FROM nodes WHERE id = $1", &over, victim.NodeID)
+	if ip != "192.0.2.10" || over != "{}" {
+		t.Fatalf("victim changed: %s %s", ip, over)
+	}
+
+	// adopt_overrides may never carry extra_lua, even for a new node
+	e.call(400, "POST", "/agent/v1/enroll", "", api.EnrollRequest{Token: tok, Hostname: "new-1", Adopt: true,
+		AdoptOverrides: json.RawMessage(`{"tuning": {"extra_lua": "os.execute('id')"}}`)}, nil)
+	// the token was not burnt by the refusals: it still enrolls a new node
+	var er api.EnrollResponse
+	e.call(200, "POST", "/agent/v1/enroll", "", api.EnrollRequest{Token: tok, Hostname: "new-1"}, &er)
+	if er.Name != "new-1" || er.NodeID == victim.NodeID {
+		t.Fatalf("new node %+v", er)
+	}
+	// a token scoped to the node still re-keys it (re-install keeps history)
+	again := e.enroll("edge-1")
+	if again.NodeID != victim.NodeID {
+		t.Fatal("scoped re-enroll must keep the node")
+	}
+	e.call(401, "GET", "/agent/v1/config", victim.NodeToken, nil, nil)
+}
+
+// Moving a node to another profile at the same version number must change the version
+// and ETag, or the agent keeps its old config and the UI shows it in sync.
+func TestProfileSwitchChangesVersion(t *testing.T) {
+	e := setup(t)
+	er := e.enroll("ns1")
+	var cfg api.AgentConfig
+	e.call(200, "GET", "/agent/v1/config", er.NodeToken, nil, &cfg)
+	if cfg.Version != 1 {
+		t.Fatalf("default version %d", cfg.Version)
+	}
+	spec := api.DefaultConfigSpec()
+	spec.Cache.MaxEntries = 12345
+	raw, _ := json.Marshal(spec)
+	var pid string
+	e.scalar(`WITH p AS (INSERT INTO config_profiles (name) VALUES ('edge') RETURNING id)
+		INSERT INTO config_versions (profile_id, version, spec, published, published_at)
+		SELECT id, 1, $1, true, now() FROM p RETURNING profile_id::text`, &pid, raw)
+	e.call(200, "PATCH", "/api/v1/nodes/"+er.NodeID, "admin", map[string]any{"profile_id": pid}, nil)
+
+	var ack api.HeartbeatAck
+	e.call(200, "POST", "/agent/v1/heartbeat", er.NodeToken, api.Heartbeat{Time: time.Now(), AppliedConfigVersion: 1}, &ack)
+	if ack.ConfigVersion == 1 {
+		t.Fatal("ack version unchanged after profile switch")
+	}
+	var n api.Node
+	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID, "admin", nil, &n)
+	if n.ConfigInSync || n.DesiredConfigVersion == nil || *n.DesiredConfigVersion != ack.ConfigVersion {
+		t.Fatalf("node shows in sync / desired %v, ack %d", n.DesiredConfigVersion, ack.ConfigVersion)
+	}
+	e.call(200, "GET", "/agent/v1/config", er.NodeToken, nil, &cfg, "If-None-Match", `"1"`)
+	if cfg.Version != ack.ConfigVersion || cfg.Spec.Cache.MaxEntries != 12345 {
+		t.Fatalf("config v%d max_entries %d", cfg.Version, cfg.Spec.Cache.MaxEntries)
+	}
+	e.call(304, "GET", "/agent/v1/config", er.NodeToken, nil, nil, "If-None-Match", fmt.Sprintf(`"%d"`, cfg.Version))
+}
+
+// Traffic accumulated over a heartbeat gap (panel outage) is spread over the gap's minutes
+// with exact totals, not booked as one spike in the current minute.
+func TestHeartbeatGapSpread(t *testing.T) {
+	e := setup(t)
+	er := e.enroll("ns1")
+	t0 := time.Now().UTC().Add(-time.Hour)
+	hb := func(at time.Time, q int64) {
+		e.call(200, "POST", "/agent/v1/heartbeat", er.NodeToken, api.Heartbeat{Time: at, DnsdistRunning: true,
+			Counters: api.Counters{Queries: q, NXDomain: q / 10}}, nil)
+	}
+	hb(t0, 1_000_000)
+	hb(t0.Add(time.Hour), 1_000_000+3_600_007)
+	var rows int
+	var sum, maxQ, nx int64
+	e.scalar("SELECT count(*) FROM metrics_minutely WHERE node_id = $1", &rows, er.NodeID)
+	e.scalar("SELECT sum(queries)::bigint FROM metrics_minutely WHERE node_id = $1", &sum, er.NodeID)
+	e.scalar("SELECT max(queries)::bigint FROM metrics_minutely WHERE node_id = $1", &maxQ, er.NodeID)
+	e.scalar("SELECT sum(nxdomain)::bigint FROM metrics_minutely WHERE node_id = $1", &nx, er.NodeID)
+	if rows != 60 || sum != 3_600_007 || maxQ != 60_001 || nx != 360_000 {
+		t.Fatalf("rows %d sum %d max %d nx %d", rows, sum, maxQ, nx)
+	}
+	// a normal interval stays in the current minute
+	hb(t0.Add(time.Hour+15*time.Second), 1_000_000+3_600_007+100)
+	e.scalar("SELECT count(*) FROM metrics_minutely WHERE node_id = $1", &rows, er.NodeID)
+	e.scalar("SELECT sum(queries)::bigint FROM metrics_minutely WHERE node_id = $1", &sum, er.NodeID)
+	if rows != 60 || sum != 3_600_107 {
+		t.Fatalf("after normal hb: rows %d sum %d", rows, sum)
 	}
 }

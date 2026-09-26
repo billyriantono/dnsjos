@@ -94,6 +94,9 @@ function Users() {
             size="icon"
             className="size-8"
             aria-label="Reset password"
+            // PATCHing a password ends every session of that user, including this one; use Change password in the account menu instead.
+            disabled={u.id === me?.id}
+            title={u.id === me?.id ? 'Use Change password in the account menu' : undefined}
             onClick={() => setEditing({ mode: 'password', user: u })}
           >
             <LuKeyRound />

@@ -22,6 +22,6 @@ setServerPolicy(whashed)
 
 -- Analytics: every answer (forwarded, cache hit, self-answered) to the agent.
 local analytics = newFrameStreamTcpLogger("[::1]:6101")
-addResponseAction(ProbaRule(1 / 10), DnstapLogResponseAction("dns1.example", analytics), {name = "dnsjos-analytics"})
-addCacheHitResponseAction(ProbaRule(1 / 10), DnstapLogResponseAction("dns1.example", analytics), {name = "dnsjos-analytics"})
-addSelfAnsweredResponseAction(ProbaRule(1 / 10), DnstapLogResponseAction("dns1.example", analytics), {name = "dnsjos-analytics"})
+addResponseAction(ProbaRule(1 / 10), DnstapLogResponseAction("dns1.example", analytics), {name = "dnsjos-analytics-response"})
+addCacheHitResponseAction(ProbaRule(1 / 10), DnstapLogResponseAction("dns1.example", analytics), {name = "dnsjos-analytics-cachehit"})
+addSelfAnsweredResponseAction(ProbaRule(1 / 10), DnstapLogResponseAction("dns1.example", analytics), {name = "dnsjos-analytics-self"})

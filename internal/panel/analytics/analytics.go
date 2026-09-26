@@ -127,23 +127,29 @@ func nonNil(m map[string]int64) map[string]int64 {
 	return m
 }
 
-// trim keeps the top keepPerGroup names of every (day, node, kind) of ended days. Days are
-// the agents' local days, so a day counts as over once it has ended in every time zone.
-// Idempotent: only groups still above the cap are touched, which also catches late
-// (spooled) batches for already trimmed days.
-// ponytail: the HAVING pass seq-scans every ended day each run (the delete side is
-// skipped when nothing is over the cap); track a trimmed-up-to day if that gets slow.
+// trim keeps, for every (day, node, kind) of ended days, the rows that are in the node's
+// top keepPerGroup or in the fleet's top keepPerGroup for that (day, kind). The fleet rule
+// stops a name that sits just below every node's cut-off from vanishing from the fleet
+// report although its fleet total is among the largest (so a node keeps at most 2x the cap).
+// Days are the agents' local days, so a day counts as over once it has ended in every
+// time zone. Idempotent: only (day, kind)s with a node above the cap are touched, which
+// also catches late (spooled) batches for already trimmed days.
 func (s *svc) trim(ctx context.Context) error {
 	tag, err := s.d.Pool.Exec(ctx, `
 		WITH g AS (
-			SELECT day, node_id, kind FROM analytics_top_daily WHERE day < current_date - 1
-			GROUP BY day, node_id, kind HAVING count(*) > $1),
+			SELECT DISTINCT day, kind FROM (
+				SELECT day, kind FROM analytics_top_daily WHERE day < current_date - 1
+				GROUP BY day, node_id, kind HAVING count(*) > $1) x),
+		f AS (
+			SELECT t.day, t.kind, t.name,
+			       row_number() OVER (PARTITION BY t.day, t.kind ORDER BY sum(t.count) DESC, t.name) AS frn
+			FROM analytics_top_daily t JOIN g USING (day, kind) GROUP BY t.day, t.kind, t.name),
 		r AS (
 			SELECT t.day, t.node_id, t.kind, t.name,
 			       row_number() OVER (PARTITION BY t.day, t.node_id, t.kind ORDER BY t.count DESC, t.name) AS rn
-			FROM analytics_top_daily t JOIN g USING (day, node_id, kind))
-		DELETE FROM analytics_top_daily t USING r
-		WHERE r.rn > $1 AND t.day = r.day AND t.node_id = r.node_id AND t.kind = r.kind AND t.name = r.name`,
+			FROM analytics_top_daily t JOIN g USING (day, kind))
+		DELETE FROM analytics_top_daily t USING r JOIN f USING (day, kind, name)
+		WHERE r.rn > $1 AND f.frn > $1 AND t.day = r.day AND t.node_id = r.node_id AND t.kind = r.kind AND t.name = r.name`,
 		keepPerGroup)
 	if err != nil {
 		return fmt.Errorf("analytics trim: %w", err)

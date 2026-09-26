@@ -193,8 +193,9 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 			rule = fmt.Sprintf("ProbaRule(1 / %d)", an.SampleRate)
 		}
 		w("\n-- Analytics: every answer (forwarded, cache hit, self-answered) to the agent.\nlocal analytics = newFrameStreamTcpLogger(%s)\n", luaString(ap))
-		for _, chain := range []string{"addResponseAction", "addCacheHitResponseAction", "addSelfAnsweredResponseAction"} {
-			w("%s(%s, DnstapLogResponseAction(%s, analytics), {name = \"dnsjos-analytics\"})\n", chain, rule, luaString(rt.Hostname))
+		// Distinct names: dnsdist exports rule hits by name, duplicates break /metrics.
+		for _, c := range [][2]string{{"addResponseAction", "response"}, {"addCacheHitResponseAction", "cachehit"}, {"addSelfAnsweredResponseAction", "self"}} {
+			w("%s(%s, DnstapLogResponseAction(%s, analytics), {name = \"dnsjos-analytics-%s\"})\n", c[0], rule, luaString(rt.Hostname), c[1])
 		}
 	}
 	if x := strings.TrimRight(spec.Tuning.ExtraLua, "\n"); strings.TrimSpace(x) != "" {

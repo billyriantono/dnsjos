@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -12,8 +13,12 @@ import (
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
 
-// maxBatchItems keeps each POST well under api.AnalyticsMaxBody (≈ 100 bytes per item).
-const maxBatchItems = 40000
+// maxBatchItems and maxBatchBytes keep each POST well under api.AnalyticsMaxBody,
+// also with long names.
+const (
+	maxBatchItems = 40000
+	maxBatchBytes = 8 << 20
+)
 
 // window is one flush window of one day at one sample rate.
 type window struct {
@@ -138,18 +143,18 @@ func (w *window) batches() []api.AnalyticsBatch {
 	b := api.AnalyticsBatch{Day: w.day, Total: w.total, ByQType: w.byQType, ByRcode: w.byRcode, SampleRate: w.rate,
 		Tops: map[string][]api.AnalyticsTopItem{}}
 	out := []api.AnalyticsBatch{}
-	n := 0
+	n, size := 0, 0
 	for _, kind := range api.AnalyticsKinds {
-		for items := w.tops[kind].Top(); len(items) > 0; {
-			if n == maxBatchItems {
+		for _, it := range w.tops[kind].Top() {
+			raw, _ := json.Marshal(it)
+			if n == maxBatchItems || size+len(raw)+1 > maxBatchBytes {
 				out = append(out, b)
 				b = api.AnalyticsBatch{Day: w.day, ByQType: map[string]int64{}, ByRcode: map[string]int64{}, SampleRate: w.rate,
 					Tops: map[string][]api.AnalyticsTopItem{}}
-				n = 0
+				n, size = 0, 0
 			}
-			take := min(len(items), maxBatchItems-n)
-			b.Tops[kind] = append(b.Tops[kind], items[:take]...)
-			items, n = items[take:], n+take
+			b.Tops[kind] = append(b.Tops[kind], it)
+			n, size = n+1, size+len(raw)+1
 		}
 	}
 	return append(out, b)

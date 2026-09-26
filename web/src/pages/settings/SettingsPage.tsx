@@ -14,6 +14,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { useSettings, useUpdateSettings } from '@/lib/api/client'
 import type { Settings } from '@/lib/api/types'
 import { fmtDuration } from '@/lib/format'
+import { SETTINGS_BOUNDS } from '@/lib/settingsBounds'
 
 type NumKey = Exclude<keyof Settings, 'public_url'>
 
@@ -26,8 +27,7 @@ const sections: { title: string; description: string; fields: { key: NumKey; lab
         key: 'blocklist_build_interval_minutes',
         label: 'Build interval',
         unit: 'minutes',
-        min: 5,
-        max: 1440,
+        ...SETTINGS_BOUNDS.blocklist_build_interval_minutes,
         hint: (v) => `Every ${fmtDuration(v * 60)}. Unchanged sources produce a skipped build.`,
       },
     ],
@@ -36,14 +36,20 @@ const sections: { title: string; description: string; fields: { key: NumKey; lab
     title: 'Retention',
     description: 'Older data is deleted by the nightly retention job.',
     fields: [
-      { key: 'metrics_retention_days', label: 'Metrics', unit: 'days', min: 1, max: 400, hint: () => 'Per-minute node metrics.' },
+      { key: 'metrics_retention_days', label: 'Metrics', unit: 'days', ...SETTINGS_BOUNDS.metrics_retention_days, hint: () => 'Per-minute node metrics.' },
       {
         key: 'blocked_retention_days',
         label: 'Blocked domains',
         unit: 'days',
-        min: 30,
-        max: 3650,
+        ...SETTINGS_BOUNDS.blocked_retention_days,
         hint: () => 'Daily blocked-domain counts used by Reports. Keep > 365 for the yearly report.',
+      },
+      {
+        key: 'analytics_retention_days',
+        label: 'Analytics',
+        unit: 'days',
+        ...SETTINGS_BOUNDS.analytics_retention_days,
+        hint: () => 'Query analytics. Agent batches older than this are dropped.',
       },
     ],
   },
@@ -51,13 +57,12 @@ const sections: { title: string; description: string; fields: { key: NumKey; lab
     title: 'Agents',
     description: 'Sent to every agent with its config; changes apply on the next poll.',
     fields: [
-      { key: 'agent_poll_interval_s', label: 'Config poll interval', unit: 'seconds', min: 5, max: 300, hint: () => 'How often agents check for a new config version.' },
+      { key: 'agent_poll_interval_s', label: 'Config poll interval', unit: 'seconds', ...SETTINGS_BOUNDS.agent_poll_interval_s, hint: () => 'How often agents check for a new config version.' },
       {
         key: 'agent_heartbeat_interval_s',
         label: 'Heartbeat interval',
         unit: 'seconds',
-        min: 5,
-        max: 300,
+        ...SETTINGS_BOUNDS.agent_heartbeat_interval_s,
         hint: (v) => `A node is marked offline after ${fmtDuration(v * 3)} without a heartbeat.`,
       },
     ],

@@ -294,6 +294,8 @@ req 422 admin POST /api/v1/upgrades '{"kind":"dnsdist","target_version":"9.9"}'
 req 422 admin POST /api/v1/upgrades "{\"kind\":\"dnsdist\",\"target_version\":\"2.0.1-1\",\"node_ids\":[\"$Z\"]}"
 [ -n "${EXPECT_AGENT:-}" ] || req 422 admin POST /api/v1/upgrades '{"kind":"agent"}' # nothing embedded
 req 200 "$NTOK" POST /agent/v1/heartbeat "${HB%\}}$INV" # both nodes fresh and online
+# ack the manual upgrade_dnsdist delivered just now, else the node counts as upgrading
+req 200 "$NTOK" POST /agent/v1/heartbeat "${HB%\}}${INV%\}},\"acked_commands\":$(jq -c '[.commands[].id]' "$TMP/body")}"
 req 200 "$ATOK" POST /agent/v1/heartbeat "${HB%\}}$INV"
 req 201 admin POST /api/v1/upgrades '{"kind":"dnsdist","target_version":"2.0.1-1"}'
 RUN=$(j .id)

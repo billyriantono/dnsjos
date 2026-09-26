@@ -462,7 +462,9 @@ func (a *agent) upgradeAgent(ctx context.Context) *api.UpgradeResult {
 	}
 	a.o.Log.Info("agent binary replaced, restarting")
 	a.heartbeat(ctx) // ack the command before exiting
+	a.opMu.Lock()    // let a running config apply finish first
 	a.stop(ErrRestart)
+	a.opMu.Unlock()
 	return nil
 }
 

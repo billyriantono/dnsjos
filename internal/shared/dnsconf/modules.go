@@ -53,17 +53,19 @@ func renderBlocking(b api.Blocking, rt api.NodeRuntime) ([]byte, error) {
 declareMetric("dnsjos-blocked", "counter", "Queries answered with the blockpage")
 `)
 	w("local kvs = newCDBKVStore(%s, 60)\n", luaString(rt.CDBPath))
-	s.WriteString(`local blocked = TagRule("dnsjos", "blocked")
+	// A fresh TagRule per rule: dnsdist counts matches on the selector object, so a
+	// shared one would make every rule's hit counter the sum of all of them.
+	s.WriteString(`local function blocked() return TagRule("dnsjos", "blocked") end
 addAction(KeyValueStoreLookupRule(kvs, KeyValueLookupKeySuffix(0, true)), SetTagAction("dnsjos", "blocked"), {name = "dnsjos-blocklist"})
-addAction(blocked, LuaAction(function() incMetric("dnsjos-blocked") return DNSAction.None, "" end), {name = "dnsjos-blocked-count"})
+addAction(blocked(), LuaAction(function() incMetric("dnsjos-blocked") return DNSAction.None, "" end), {name = "dnsjos-blocked-count"})
 `)
 	if b.LogBlocked {
 		w("local dnstap = newFrameStreamTcpLogger(%s)\n", luaString(rt.DnstapAddr))
-		w("addAction(blocked, DnstapLogAction(%s, dnstap), {name = \"dnsjos-blocked-log\"})\n", luaString(rt.Hostname))
+		w("addAction(blocked(), DnstapLogAction(%s, dnstap), {name = \"dnsjos-blocked-log\"})\n", luaString(rt.Hostname))
 	}
 	s.WriteString("\n-- Answers; every qtype not listed gets NODATA (so HTTPS/SVCB/ANY resolve nothing).\n")
 	answer := func(qtype, action string) {
-		w("addAction(AndRule({blocked, QTypeRule(DNSQType.%s)}), %s, {name = \"dnsjos-block-%s\"})\n", qtype, action, strings.ToLower(qtype))
+		w("addAction(AndRule({blocked(), QTypeRule(DNSQType.%s)}), %s, {name = \"dnsjos-block-%s\"})\n", qtype, action, strings.ToLower(qtype))
 	}
 	answer("A", "SpoofAction("+luaString(v4.String())+")")
 	answer("AAAA", "SpoofAction("+luaString(v6.String())+")")
@@ -72,17 +74,20 @@ addAction(blocked, LuaAction(function() incMetric("dnsjos-blocked") return DNSAc
 	}
 	answer("SOA", "SpoofRawAction("+luaString(string(soa))+")")
 	answer("NS", "SpoofRawAction("+luaString(string(ns))+")")
-	s.WriteString(`addAction(blocked, RCodeAction(DNSRCode.NOERROR), {name = "dnsjos-block-nodata"})
+	s.WriteString(`addAction(blocked(), RCodeAction(DNSRCode.NOERROR), {name = "dnsjos-block-nodata"})
 `)
 
 	if b.BlockResponseIPs {
 		a4 := v4.As4()
 		w(`
--- Response IPs: A records whose address is in the CDB (key = dotted quad in wire
--- form) are rewritten in place to the blockpage. kvs:lookup() cannot tell a missing
--- key from an empty value, so each candidate goes into a tag and a native
--- KeyValueStoreLookupRule decides.
-declareMetric("dnsjos-response-ip-blocked", "counter", "A records rewritten to the blockpage")
+-- Response IPs: when any A record's address is in the CDB (key = dotted quad in wire
+-- form), EVERY A record in the answer is rewritten to the blockpage with TTL 60, so the
+-- client never gets a mix of blockpage and real addresses. The rewritten answer is not
+-- cached: each one is counted/logged and CDB updates apply at once. Only A answers are
+-- checked (the IP list is IPv4-only). kvs:lookup() cannot tell a missing key from an
+-- empty value, so each candidate goes into a tag and a native KeyValueStoreLookupRule
+-- decides.
+declareMetric("dnsjos-response-ip-blocked", "counter", "Answers rewritten to the blockpage because an A record is listed")
 local BLOCKPAGE4 = %s
 `, luaString(string(a4[:])))
 		s.WriteString(skipNameLua)
@@ -91,7 +96,7 @@ local BLOCKPAGE4 = %s
   if #p < 12 then return DNSResponseAction.None, "" end
   local qd = p:byte(5) * 256 + p:byte(6)
   local an = p:byte(7) * 256 + p:byte(8)
-  local pos, n = 13, 0
+  local pos, at = 13, {}
   for _ = 1, qd do
     pos = skipName(p, pos)
     if not pos then return DNSResponseAction.None, "" end
@@ -104,34 +109,46 @@ local BLOCKPAGE4 = %s
     local rdlen = p:byte(pos + 8) * 256 + p:byte(pos + 9)
     local rd = pos + 10
     if rtype == 1 and rdlen == 4 and rd + 3 <= #p then
-      local key = {}
-      for i = 0, 3 do
-        local o = tostring(p:byte(rd + i))
-        key[#key + 1] = string.char(#o) .. o
+      at[#at + 1] = rd
+      if #at <= %d then
+        local key = {}
+        for i = 0, 3 do
+          local o = tostring(p:byte(rd + i))
+          key[#key + 1] = string.char(#o) .. o
+        end
+        dr:setTag("dnsjos-rip" .. #at, table.concat(key) .. "\000")
       end
-      n = n + 1
-      dr:setTag("dnsjos-rip" .. n, table.concat(key) .. "\000")
-      dr:setTag("dnsjos-ripat" .. n, tostring(rd))
-      if n == %d then break end
     end
     pos = rd + rdlen
   end
+  if #at > 0 then dr:setTag("dnsjos-ripat", table.concat(at, ",")) end
   return DNSResponseAction.None, ""
 end), {name = "dnsjos-response-ip-scan"})
-local function ripRewrite(i)
-  return function(dr)
-    local at = tonumber(dr:getTag("dnsjos-ripat" .. i))
-    local p = dr:getContent()
-    if not at or at + 3 > #p then return DNSResponseAction.None, "" end
-    dr:setContent(p:sub(1, at - 1) .. BLOCKPAGE4 .. p:sub(at + 4))
-    dr:setTag("dnsjos", "ipblocked")
-    incMetric("dnsjos-response-ip-blocked")
-    return DNSResponseAction.None, ""
+-- rdata offsets are 1-based; the TTL sits 6 bytes before the rdata, rdlength 2 before.
+local function ripRewrite(dr)
+  if dr:getTag("dnsjos") == "ipblocked" then return DNSResponseAction.None, "" end
+  local p = dr:getContent()
+  local out, last = {}, 1
+  for rd in dr:getTag("dnsjos-ripat"):gmatch("%%d+") do
+    rd = tonumber(rd)
+    if rd - 6 < last or rd + 3 > #p then return DNSResponseAction.None, "" end
+    out[#out + 1] = p:sub(last, rd - 7)
+    out[#out + 1] = "\000\000\000\060"
+    out[#out + 1] = p:sub(rd - 2, rd - 1)
+    out[#out + 1] = BLOCKPAGE4
+    last = rd + 4
   end
+  if last == 1 then return DNSResponseAction.None, "" end
+  out[#out + 1] = p:sub(last)
+  dr:setContent(table.concat(out))
+  dr:setTag("dnsjos", "ipblocked")
+  incMetric("dnsjos-response-ip-blocked")
+  return DNSResponseAction.None, ""
 end
 for i = 1, %d do
-  addResponseAction(KeyValueStoreLookupRule(kvs, KeyValueLookupKeyTag("dnsjos-rip" .. i)), LuaResponseAction(ripRewrite(i)), {name = "dnsjos-response-ip-" .. i})
+  addResponseAction(KeyValueStoreLookupRule(kvs, KeyValueLookupKeyTag("dnsjos-rip" .. i)), LuaResponseAction(ripRewrite), {name = "dnsjos-response-ip-" .. i})
 end
+addResponseAction(TagRule("dnsjos", "ipblocked"), SetSkipCacheResponseAction(), {name = "dnsjos-response-ip-nocache"})
 `, ripSlots, ripSlots)
 		if b.LogBlocked {
 			w("addResponseAction(TagRule(\"dnsjos\", \"ipblocked\"), DnstapLogResponseAction(%s, dnstap), {name = \"dnsjos-response-ip-log\"})\n", luaString(rt.Hostname))
@@ -169,7 +186,7 @@ local trustedNMG = newNMG()
 for _, r in ipairs(trusted) do trustedNMG:addMask(r) end
 
 -- MaxQPSIPRule matches clients OVER the rate: never wrap it in NotRule.
-addAction(AndRule({NotRule(NetmaskGroupRule(trustedNMG)), MaxQPSIPRule(%d, 32, 64, %d)}), DropAction(), {name = "dnsjos-per-client-qps-cap"})
+addAction(AndRule({NotRule(NetmaskGroupRule(trustedNMG)), MaxQPSIPRule(%d, 32, 64, %d)}), DropAction(), {name = "per-client-qps-cap"})
 mvRuleToTop()
 
 local dbr = dynBlockRulesGroup()
@@ -324,7 +341,7 @@ local function cgkRewrite(dr)
 end
 
 addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), QTypeRule(DNSQType.A), NotRule(SuffixMatchNodeRule(excludeSMN, true))}),
-                  LuaResponseAction(cgkRewrite), {name = "dnsjos-cgk"})
+                  LuaResponseAction(cgkRewrite), {name = "cloudflare-cgk"})
 `)
 	return []byte(s.String()), nil
 }

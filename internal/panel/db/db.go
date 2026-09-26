@@ -98,6 +98,15 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []string, err err
 	return applied, nil
 }
 
+// LockUpgrades takes the transaction-scoped lock that serialises everything that starts a
+// dnsdist/agent upgrade (upgrade runs and manual upgrade commands), so the "is anything
+// upgrading?" check and the insert that starts one cannot interleave (SPEC §18: never more
+// than one node upgrading at a time).
+func LockUpgrades(ctx context.Context, q Querier) error {
+	_, err := q.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext('dnsjos.upgrades'))")
+	return err
+}
+
 // Postgres error helpers used to map DB errors to HTTP statuses.
 
 func IsUniqueViolation(err error) bool { return pgCode(err) == "23505" }

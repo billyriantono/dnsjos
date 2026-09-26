@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"syscall"
@@ -83,6 +84,10 @@ func (a *Applier) Apply(ctx context.Context, spec api.ConfigSpec, rt api.NodeRun
 	if !force && a.installed(files) {
 		return false, nil
 	}
+	if err := ctx.Err(); err != nil { // stopping: do not start a swap we may not finish
+		return false, err
+	}
+	os.RemoveAll(filepath.Join(a.Dir, StagingName)) // free its space before the swap
 	snap, err := a.preAdopt()
 	if err != nil {
 		return false, fmt.Errorf("pre-adopt snapshot: %w", err)
@@ -91,6 +96,10 @@ func (a *Applier) Apply(ctx context.Context, spec api.ConfigSpec, rt api.NodeRun
 	if err != nil {
 		return false, fmt.Errorf("backup: %w", err)
 	}
+	// From here on the node must end up consistent (new config verified, or old config
+	// restored and running) even if the agent is being stopped; the Restart and
+	// WaitConsole timeouts still bound it.
+	ctx = context.WithoutCancel(ctx)
 	gid, mode := a.owner()
 	err = a.swap(files, mode, gid)
 	if err == nil {
@@ -190,18 +199,22 @@ func (a *Applier) installed(files map[string][]byte) bool {
 	return true
 }
 
+// swap writes the modules first and dnsdist.conf (which dofile()s them) last, then
+// removes modules of features that are now off, so a swap cut short (disk full) never
+// leaves a conf pointing at missing modules.
 func (a *Applier) swap(files map[string][]byte, mode os.FileMode, gid int) error {
-	for _, rel := range Managed {
-		p := filepath.Join(a.Dir, rel)
-		b, ok := files[rel]
-		if !ok { // module of a feature that is now off
-			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+	for _, rel := range append(slices.DeleteFunc(slices.Clone(Managed), func(r string) bool { return r == dnsconf.FileConf }), dnsconf.FileConf) {
+		if b, ok := files[rel]; ok {
+			if err := writeFile(filepath.Join(a.Dir, rel), b, mode, gid); err != nil {
 				return err
 			}
-			continue
 		}
-		if err := writeFile(p, b, mode, gid); err != nil {
-			return err
+	}
+	for _, rel := range Managed {
+		if _, ok := files[rel]; !ok { // module of a feature that is now off
+			if err := os.Remove(filepath.Join(a.Dir, rel)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
 		}
 	}
 	return nil
@@ -260,18 +273,30 @@ func (a *Applier) restore(dir string, mode os.FileMode, gid int) error {
 }
 
 // owner picks the group and mode for rendered files: dnsdist runs as _dnsdist and the
-// files carry the console key, so 0640 with the group of the existing dnsdist.conf
-// (or _dnsdist); 0644 when no such group exists.
+// files carry the console key, so 0640 with group _dnsdist (or the non-root group of
+// the existing dnsdist.conf); 0644 otherwise.
 func (a *Applier) owner() (int, os.FileMode) {
-	if fi, err := os.Stat(a.Conf()); err == nil {
-		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-			return int(st.Gid), 0o640
-		}
-	}
+	dnsdistGid, confGid := -1, -1
 	if g, err := user.LookupGroup("_dnsdist"); err == nil {
 		if gid, err := strconv.Atoi(g.Gid); err == nil {
-			return gid, 0o640
+			dnsdistGid = gid
 		}
+	}
+	if fi, err := os.Stat(a.Conf()); err == nil {
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok {
+			confGid = int(st.Gid)
+		}
+	}
+	return pickOwner(dnsdistGid, confGid)
+}
+
+// pickOwner: a root-owned group would make 0640 files unreadable for dnsdist (User=_dnsdist).
+func pickOwner(dnsdistGid, confGid int) (int, os.FileMode) {
+	switch {
+	case dnsdistGid >= 0:
+		return dnsdistGid, 0o640
+	case confGid > 0:
+		return confGid, 0o640
 	}
 	return -1, 0o644
 }

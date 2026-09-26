@@ -2,6 +2,7 @@ package dnstap
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -131,7 +132,7 @@ func TestSpool(t *testing.T) {
 	dir := t.TempDir()
 	var got []api.BlockedBatch
 	fail := errors.New("panel down")
-	s := &Spool[api.BlockedBatch]{Dir: dir, MaxFiles: 2, Log: discard, Post: func(_ context.Context, b api.BlockedBatch) error {
+	s := &Spool[api.BlockedBatch]{Dir: dir, MaxFiles: 2, Log: discard, Post: func(_ context.Context, _ string, b api.BlockedBatch) error {
 		if fail != nil {
 			return fail
 		}
@@ -174,3 +175,52 @@ func TestSpool(t *testing.T) {
 }
 
 func read(p string) string { b, _ := os.ReadFile(p); return string(b) }
+
+// TestBlockedBatchesByteBound: long qnames must not push a batch over the panel's
+// 10 MiB body limit (a 400 there drops the batch for good).
+func TestBlockedBatchesByteBound(t *testing.T) {
+	long := strings.Repeat("a", 230) + ".blocked.example"
+	items := make([]api.BlockedItem, 120000)
+	for i := range items {
+		items[i] = api.BlockedItem{Day: "2026-01-02", QName: long, QType: "A", Count: 1}
+		if i%2 == 0 {
+			items[i].QName = "x.example"
+		}
+	}
+	n := 0
+	for _, b := range BlockedBatches(items) {
+		raw, _ := json.Marshal(b)
+		if len(raw) > 10<<20 || len(b.Items) > chunk {
+			t.Fatalf("batch of %d items is %d bytes", len(b.Items), len(raw))
+		}
+		n += len(b.Items)
+	}
+	if n != len(items) {
+		t.Fatalf("items %d, want %d", n, len(items))
+	}
+	if got := len(BlockedBatches(items[:0])); got != 0 {
+		t.Fatalf("empty window: %d batches", got)
+	}
+}
+
+// TestSpoolKeepsKey: a batch keeps its idempotency key across a failed post and the
+// replay from the spool, so the panel can drop a batch it already committed.
+func TestSpoolKeepsKey(t *testing.T) {
+	var keys []string
+	fail := errors.New("answer lost")
+	s := &Spool[api.BlockedBatch]{Dir: t.TempDir(), Log: discard, Post: func(_ context.Context, key string, b api.BlockedBatch) error {
+		keys = append(keys, key)
+		return fail
+	}}
+	batches := BlockedBatches([]api.BlockedItem{{Day: "2026-09-27", QName: "x", QType: "A", Count: 1}})
+	s.Flush(context.Background(), batches)
+	fail = nil
+	s.Flush(context.Background(), nil)
+	if len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
+		t.Fatalf("keys: %q", keys)
+	}
+	s.Flush(context.Background(), batches) // a new batch gets a new key
+	if len(keys) != 3 || keys[2] == keys[0] {
+		t.Fatalf("keys: %q", keys)
+	}
+}

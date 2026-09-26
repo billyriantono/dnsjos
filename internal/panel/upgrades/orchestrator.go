@@ -110,9 +110,13 @@ func pause(ctx context.Context, tx pgx.Tx, id int64, msg string) error {
 	return err
 }
 
-// startStep sends the upgrade command to the step's node, unless another node is unhealthy.
+// startStep sends the upgrade command to the step's node, unless another node is unhealthy
+// or upgrading.
 func (s *svc) startStep(ctx context.Context, tx pgx.Tx, rn run, st step, now time.Time) error {
-	if err := notReady(ctx, tx); err != nil {
+	if err := db.LockUpgrades(ctx, tx); err != nil {
+		return err
+	}
+	if err := notReady(ctx, tx, rn.id); err != nil {
 		if he, ok := err.(*httpErr); ok {
 			return pause(ctx, tx, rn.id, "not starting "+st.name+": "+he.msg)
 		}

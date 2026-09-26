@@ -67,19 +67,31 @@ func Register(r *app.Router, d *app.Deps) {
 }
 
 // configVersion is the version an agent sees (AgentConfig.Version, ETag, HeartbeatAck):
-// the profile's published version v when the node has no overrides, otherwise
-// v*100000 + (fnv32a(overrides jsonb text) % 99999) + 1, so editing overrides changes the
-// version and the ETag. overrides comes from jsonb, whose text form is canonical.
-// ponytail: 1-in-99999 chance an override edit hashes to the same version (the node then
-// picks it up with the next profile publish); fits int4 up to profile version 21474.
-func configVersion(v int, overrides []byte) int {
-	if o := strings.TrimSpace(string(overrides)); o == "" || o == "{}" || o == "null" {
-		return v
+// the profile's published version v for a node on "default" (profileKey "") without
+// overrides, otherwise v*100000 + (fnv32a(profileKey, overrides jsonb text) % 99999) + 1.
+// profileKey is the profile id for any profile but "default": version numbers are per
+// profile, so without it moving a node between two profiles at the same version would
+// keep the ETag and the agent would never fetch the new config. Editing overrides also
+// changes the version. overrides comes from jsonb, whose text form is canonical.
+// ponytail: 1-in-99999 chance a profile switch or override edit hashes to the same version
+// (the node then picks it up with the next publish); fits int4 up to profile version 21474.
+func configVersion(v int, profileKey string, overrides []byte) int {
+	o := strings.TrimSpace(string(overrides))
+	if o == "" || o == "{}" || o == "null" {
+		if profileKey == "" {
+			return v
+		}
+		overrides = nil
 	}
 	h := fnv.New32a()
+	h.Write([]byte(profileKey))
+	h.Write([]byte{0})
 	h.Write(overrides)
 	return v*100000 + int(h.Sum32()%99999) + 1
 }
+
+// profileKeySQL is configVersion's profileKey for the joined config_profiles p.
+const profileKeySQL = `CASE WHEN p.name = 'default' THEN '' ELSE p.id::text END`
 
 // currentBuild returns the newest ok blocklist build (empty when there is none).
 func currentBuild(ctx context.Context, q db.Querier) (sha string, size int64, err error) {
@@ -151,7 +163,7 @@ func writeOverridesErr(w http.ResponseWriter, r *http.Request, field string, err
 const nodeSelect = `
 SELECT n.id, n.name, n.hostname, n.public_ip, n.labels, n.status, n.profile_id, coalesce(p.name, ''),
        n.overrides, n.enrolled_at, n.last_seen_at, n.agent_version, n.dnsdist_version, n.os, n.arch,
-       n.applied_config_version, n.applied_blocklist_sha256, n.last_error, n.created_at, pv.version,
+       n.applied_config_version, n.applied_blocklist_sha256, n.last_error, n.created_at, pv.version, ` + profileKeySQL + `,
        n.dnsdist_candidate, n.dnsdist_available, n.dnsdist_repo_series, n.inventory_at, n.last_upgrade
 FROM nodes n
 LEFT JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
@@ -168,13 +180,14 @@ func (s *svc) queryNodes(ctx context.Context, where string, args ...any) ([]api.
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.Node, error) {
 		var n api.Node
 		var pv *int
+		var pkey *string
 		err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.PublicIP, &n.Labels, &n.Status, &n.ProfileID, &n.ProfileName,
 			&n.Overrides, &n.EnrolledAt, &n.LastSeenAt, &n.AgentVersion, &n.DnsdistVersion, &n.OS, &n.Arch,
-			&n.AppliedConfigVersion, &n.AppliedBlocklistSHA256, &n.LastError, &n.CreatedAt, &pv,
+			&n.AppliedConfigVersion, &n.AppliedBlocklistSHA256, &n.LastError, &n.CreatedAt, &pv, &pkey,
 			&n.DnsdistCandidate, &n.DnsdistAvailable, &n.DnsdistRepoSeries, &n.InventoryAt, &n.LastUpgrade)
 		n.AgentOutdated = agentOutdated(n.AgentVersion, s.d.AgentVersion)
-		if pv != nil {
-			v := configVersion(*pv, n.Overrides)
+		if pv != nil && pkey != nil {
+			v := configVersion(*pv, *pkey, n.Overrides)
 			n.DesiredConfigVersion = &v
 			n.ConfigInSync = n.AppliedConfigVersion != nil && *n.AppliedConfigVersion == v
 		}
@@ -407,6 +420,8 @@ func (s *svc) versions(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+var errUpgradeBusy = errors.New("an upgrade run is active or the node is upgrading; wait for it or abort the run")
+
 // command queues a node command. ?force=true allows upgrade_agent on a node whose agent
 // already matches the embedded one (reinstall).
 func (s *svc) command(w http.ResponseWriter, r *http.Request) {
@@ -418,11 +433,8 @@ func (s *svc) command(w http.ResponseWriter, r *http.Request) {
 	}
 	var available []string
 	var agentVer string
-	var busy bool
-	if err := s.d.Pool.QueryRow(ctx, `SELECT dnsdist_available, agent_version,
-			coalesce((last_heartbeat->>'upgrade_in_progress')::bool, false)
-			OR EXISTS (SELECT 1 FROM upgrade_runs WHERE status IN ('running', 'paused'))
-		FROM nodes WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&available, &agentVer, &busy); err != nil {
+	if err := s.d.Pool.QueryRow(ctx, `SELECT dnsdist_available, agent_version
+		FROM nodes WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&available, &agentVer); err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
@@ -438,13 +450,23 @@ func (s *svc) command(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteError(w, http.StatusUnprocessableEntity, "invalid_command", err.Error())
 		return
 	}
-	if busy && (strings.HasPrefix(req.Type, "upgrade_") || req.Type == api.CmdSetDnsdistSeries) {
-		httpx.WriteError(w, http.StatusConflict, "upgrade_running",
-			"an upgrade run is active or the node is upgrading; wait for it or abort the run")
-		return
-	}
 	var c api.Command
 	err = pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
+		if strings.HasPrefix(req.Type, "upgrade_") || req.Type == api.CmdSetDnsdistSeries {
+			// Under the upgrade lock, so a rolling run cannot start between check and insert.
+			if err := db.LockUpgrades(ctx, tx); err != nil {
+				return err
+			}
+			var busy bool
+			if err := tx.QueryRow(ctx, `SELECT coalesce((last_heartbeat->>'upgrade_in_progress')::bool, false)
+					OR EXISTS (SELECT 1 FROM upgrade_runs WHERE status IN ('running', 'paused'))
+				FROM nodes WHERE id = $1`, id).Scan(&busy); err != nil {
+				return err
+			}
+			if busy {
+				return errUpgradeBusy
+			}
+		}
 		if err := tx.QueryRow(ctx, `INSERT INTO node_commands (node_id, type, params, created_by)
 			VALUES ($1, $2, jsonb_strip_nulls(jsonb_build_object('version', nullif($3, ''), 'series', nullif($4, ''))), $5)
 			RETURNING id, type`, id, req.Type, req.Version, req.Series, app.UserIDFrom(ctx)).Scan(&c.ID, &c.Type); err != nil {
@@ -453,6 +475,10 @@ func (s *svc) command(w http.ResponseWriter, r *http.Request) {
 		c.Version, c.Series = req.Version, req.Series
 		return audit.Record(r, tx, "node.command", "node", id, c)
 	})
+	if errors.Is(err, errUpgradeBusy) {
+		httpx.WriteError(w, http.StatusConflict, "upgrade_running", err.Error())
+		return
+	}
 	if err != nil {
 		httpx.WriteDBError(w, r, err)
 		return

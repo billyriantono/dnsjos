@@ -162,13 +162,17 @@ func (c *Client) Heartbeat(ctx context.Context, hb *api.Heartbeat) (api.Heartbea
 	return out, err
 }
 
-func (c *Client) PostBlocked(ctx context.Context, b api.BlockedBatch) error {
-	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/blocked", b, nil, nil)
+// IdempotencyHeader carries a batch's key; it is the same on every retry and replay of
+// that batch, so the panel can skip a batch it already committed.
+const IdempotencyHeader = "Idempotency-Key"
+
+func (c *Client) PostBlocked(ctx context.Context, key string, b api.BlockedBatch) error {
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/blocked", b, nil, http.Header{IdempotencyHeader: {key}})
 	return err
 }
 
-func (c *Client) PostAnalytics(ctx context.Context, b api.AnalyticsBatch) error {
-	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/analytics", b, nil, nil)
+func (c *Client) PostAnalytics(ctx context.Context, key string, b api.AnalyticsBatch) error {
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/analytics", b, nil, http.Header{IdempotencyHeader: {key}})
 	return err
 }
 

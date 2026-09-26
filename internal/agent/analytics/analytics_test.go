@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand/v2"
 	"runtime"
@@ -194,6 +195,28 @@ func TestBatchesSplit(t *testing.T) {
 	}
 	if len(b) != 3 || total != maxBatchItems+500 || items != 2*(maxBatchItems+500) {
 		t.Fatalf("%d batches, total %d, items %d", len(b), total, items)
+	}
+}
+
+// TestBatchesByteBound: long names must not push a batch over api.AnalyticsMaxBody.
+func TestBatchesByteBound(t *testing.T) {
+	a := &Agg{}
+	a.Configure(1, maxBatchItems)
+	for i := range maxBatchItems {
+		a.add("2026-09-27", fmt.Sprintf("%0240d.example", i), "A", "NXDOMAIN")
+	}
+	items := 0
+	for _, x := range a.Take() {
+		raw, _ := json.Marshal(x)
+		if len(raw) > api.AnalyticsMaxBody || x.Validate() != nil {
+			t.Fatalf("batch is %d bytes: %v", len(raw), x.Validate())
+		}
+		for _, it := range x.Tops {
+			items += len(it)
+		}
+	}
+	if items != 3*maxBatchItems { // queried, queried_grouped, nxdomain
+		t.Fatalf("items %d", items)
 	}
 }
 

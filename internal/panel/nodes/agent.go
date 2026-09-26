@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -18,7 +19,7 @@ import (
 
 type effective struct {
 	profile string
-	version int // configVersion(profile version, overrides)
+	version int // configVersion(profile version, profile, overrides)
 	spec    []byte
 	over    []byte
 }
@@ -27,17 +28,18 @@ type effective struct {
 // when unset). ok is false when that profile has nothing published.
 func effectiveConfig(ctx context.Context, q db.Querier, nodeID string) (e effective, ok bool, err error) {
 	var v int
+	var key string
 	err = q.QueryRow(ctx, `
-		SELECT p.name, v.version, v.spec, n.overrides
+		SELECT p.name, v.version, v.spec, n.overrides, `+profileKeySQL+`
 		FROM nodes n
 		JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
 		JOIN LATERAL (SELECT version, spec FROM config_versions WHERE profile_id = p.id AND published
 		              ORDER BY version DESC LIMIT 1) v ON true
-		WHERE n.id = $1`, nodeID).Scan(&e.profile, &v, &e.spec, &e.over)
+		WHERE n.id = $1`, nodeID).Scan(&e.profile, &v, &e.spec, &e.over, &key)
 	if db.IsNotFound(err) {
 		return e, false, nil
 	}
-	e.version = configVersion(v, e.over)
+	e.version = configVersion(v, key, e.over)
 	return e, err == nil, err
 }
 
@@ -152,6 +154,38 @@ func nodeStatus(hb *api.Heartbeat) string {
 	return api.NodeOnline
 }
 
+// maxGapMinutes caps how far back a heartbeat gap's traffic is spread (one row per minute).
+// ponytail: a gap longer than a week books its remainder in the oldest spread minute.
+const maxGapMinutes = 7 * 24 * 60
+
+// gapMinutes is the number of minute buckets a delta covering gap is spread over: 1 for
+// normal heartbeats, so traffic accumulated over a panel outage or network blip does not
+// land as one huge spike in the current minute.
+func gapMinutes(gap time.Duration) int {
+	n := int((gap + time.Minute - 1) / time.Minute)
+	return max(1, min(n, maxGapMinutes))
+}
+
+// metricsInsert adds a counter delta to metrics_minutely, spread evenly over the $15
+// minutes ending at the current one (integer remainders go to the newest minutes, so the
+// totals are exact). Latency samples belong to the current minute only.
+var metricsInsert = func() string {
+	cols := []string{"queries", "responses", "cache_hits", "cache_misses", "blocked", "dyn_blocked", "rule_drops",
+		"servfail", "nxdomain", "noerror", "cgk_rewrites"}
+	var sel, upd strings.Builder
+	for i, c := range cols {
+		fmt.Fprintf(&sel, ", $%[1]d::bigint / $15 + (k < $%[1]d::bigint %% $15)::int", i+2)
+		fmt.Fprintf(&upd, "%[1]s = metrics_minutely.%[1]s + EXCLUDED.%[1]s, ", c)
+	}
+	return `INSERT INTO metrics_minutely (node_id, ts, ` + strings.Join(cols, ", ") + `, latency_sum_ms, samples)
+		SELECT $1, date_trunc('minute', now()) - make_interval(mins => k)` + sel.String() + `,
+			CASE WHEN k = 0 THEN $13::double precision ELSE 0 END, CASE WHEN k = 0 THEN $14::int ELSE 0 END
+		FROM generate_series(0, $15::int - 1) AS k
+		ON CONFLICT (node_id, ts) DO UPDATE SET ` + upd.String() + `
+			latency_sum_ms = metrics_minutely.latency_sum_ms + EXCLUDED.latency_sum_ms,
+			samples = metrics_minutely.samples + EXCLUDED.samples`
+}()
+
 func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), app.NodeIDFrom(r.Context())
 	var hb api.Heartbeat
@@ -190,6 +224,11 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 			pc = &prev.Counters
 		}
 		d := counterDelta(pc, hb.Counters)
+		// An older heartbeat whose counters went down is a late/duplicate delivery, not a
+		// dnsdist restart: book nothing and keep the newer baseline.
+		if prev != nil && hb.Time.Before(prev.Time) && d == hb.Counters && d != (api.Counters{}) {
+			d, prev, raw = api.Counters{}, nil, prevRaw
+		}
 		if prev != nil {
 			rt = liveRate(prev, &hb, d)
 		}
@@ -218,26 +257,12 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 			samples, latency = 1, hb.LatencyAvgMs
 		}
 		if d != (api.Counters{}) || samples > 0 {
-			if _, err := tx.Exec(ctx, `
-				INSERT INTO metrics_minutely (node_id, ts, queries, responses, cache_hits, cache_misses, blocked,
-					dyn_blocked, rule_drops, servfail, nxdomain, noerror, cgk_rewrites, latency_sum_ms, samples)
-				VALUES ($1, date_trunc('minute', now()), $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-				ON CONFLICT (node_id, ts) DO UPDATE SET
-					queries = metrics_minutely.queries + EXCLUDED.queries,
-					responses = metrics_minutely.responses + EXCLUDED.responses,
-					cache_hits = metrics_minutely.cache_hits + EXCLUDED.cache_hits,
-					cache_misses = metrics_minutely.cache_misses + EXCLUDED.cache_misses,
-					blocked = metrics_minutely.blocked + EXCLUDED.blocked,
-					dyn_blocked = metrics_minutely.dyn_blocked + EXCLUDED.dyn_blocked,
-					rule_drops = metrics_minutely.rule_drops + EXCLUDED.rule_drops,
-					servfail = metrics_minutely.servfail + EXCLUDED.servfail,
-					nxdomain = metrics_minutely.nxdomain + EXCLUDED.nxdomain,
-					noerror = metrics_minutely.noerror + EXCLUDED.noerror,
-					cgk_rewrites = metrics_minutely.cgk_rewrites + EXCLUDED.cgk_rewrites,
-					latency_sum_ms = metrics_minutely.latency_sum_ms + EXCLUDED.latency_sum_ms,
-					samples = metrics_minutely.samples + EXCLUDED.samples`,
-				id, d.Queries, d.Responses, d.CacheHits, d.CacheMisses, d.Blocked, d.DynBlocked, d.RuleDrops,
-				d.Servfail, d.NXDomain, d.NoError, d.CGKRewrites, latency, samples); err != nil {
+			spread := 1
+			if prev != nil {
+				spread = gapMinutes(hb.Time.Sub(prev.Time))
+			}
+			if _, err := tx.Exec(ctx, metricsInsert, id, d.Queries, d.Responses, d.CacheHits, d.CacheMisses, d.Blocked,
+				d.DynBlocked, d.RuleDrops, d.Servfail, d.NXDomain, d.NoError, d.CGKRewrites, latency, samples, spread); err != nil {
 				return err
 			}
 		}

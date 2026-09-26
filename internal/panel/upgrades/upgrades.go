@@ -140,10 +140,21 @@ func (s *svc) get(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, u)
 }
 
-// notReady lists live nodes that are not online: no node may be taken down for an upgrade
-// while another one is already unhealthy.
-func notReady(ctx context.Context, q db.Querier) error {
-	rows, _ := q.Query(ctx, "SELECT name || ' (' || status || ')' FROM nodes WHERE deleted_at IS NULL AND status <> 'online' ORDER BY name")
+// notReady lists live nodes that are not online or are upgrading: no node may be taken
+// down for an upgrade while another one is already unhealthy or upgrading (a manual
+// upgrade command). A node counts as upgrading while its heartbeat says so, or while an
+// upgrade/series command for it is queued or delivered with no heartbeat since.
+// A node with a running step of run ownRun counts only by its status (resuming a paused
+// run while its own node upgrades). Callers hold db.LockUpgrades.
+func notReady(ctx context.Context, q db.Querier, ownRun int64) error {
+	rows, _ := q.Query(ctx, `SELECT n.name || ' (' || CASE WHEN n.status <> 'online' THEN n.status ELSE 'upgrading' END || ')'
+		FROM nodes n WHERE n.deleted_at IS NULL AND (n.status <> 'online'
+			OR NOT EXISTS (SELECT 1 FROM upgrade_run_steps s WHERE s.run_id = $1 AND s.node_id = n.id AND s.status = 'running')
+			AND (coalesce((n.last_heartbeat->>'upgrade_in_progress')::bool, false)
+			OR EXISTS (SELECT 1 FROM node_commands c WHERE c.node_id = n.id
+				AND (c.type LIKE 'upgrade\_%' OR c.type = 'set_dnsdist_series') AND c.acked_at IS NULL
+				AND (c.delivered_at IS NULL OR n.last_seen_at IS NULL OR c.delivered_at >= n.last_seen_at))))
+		ORDER BY n.name`, ownRun)
 	names, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err == nil && len(names) > 0 {
 		err = &httpErr{http.StatusConflict, "nodes_not_ready", "nodes not ready: " + strings.Join(names, ", ")}
@@ -190,6 +201,9 @@ func (s *svc) create(w http.ResponseWriter, r *http.Request) {
 				return invalid(fmt.Sprintf("target_version: agent upgrades can only target the embedded agent %q", s.d.AgentVersion))
 			}
 		}
+		if err := db.LockUpgrades(ctx, tx); err != nil {
+			return err
+		}
 		if err := activeRun(ctx, tx); err != nil {
 			return err
 		}
@@ -227,7 +241,7 @@ func (s *svc) create(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if err := notReady(ctx, tx); err != nil {
+		if err := notReady(ctx, tx, 0); err != nil {
 			return err
 		}
 		if err := tx.QueryRow(ctx, `INSERT INTO upgrade_runs (kind, target_version, created_by, created_at)
@@ -283,7 +297,10 @@ func (s *svc) action(w http.ResponseWriter, r *http.Request) {
 			if status != api.RunPaused {
 				return badState
 			}
-			if err := notReady(ctx, tx); err != nil {
+			if err := db.LockUpgrades(ctx, tx); err != nil {
+				return err
+			}
+			if err := notReady(ctx, tx, id); err != nil {
 				return err
 			}
 			// A failed step is retried from scratch.
