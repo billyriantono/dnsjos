@@ -8,7 +8,6 @@ import (
 	"hash/fnv"
 	"net/http"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"text/template"
@@ -22,6 +21,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
 	"github.com/billyriantono/dnsjos/internal/panel/install"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
+	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
 
 type svc struct {
@@ -50,6 +50,7 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Viewer("GET /api/v1/nodes/{id}/live", s.live)
 	r.Viewer("GET /api/v1/nodes/{id}/cgk", s.cgkLatest)
 	r.Admin("POST /api/v1/nodes/{id}/commands", s.command)
+	r.Viewer("GET /api/v1/nodes/{id}/versions", s.versions)
 
 	r.Public("POST /agent/v1/enroll", s.enroll)
 	r.Agent("GET /agent/v1/config", s.config)
@@ -150,7 +151,8 @@ func writeOverridesErr(w http.ResponseWriter, r *http.Request, field string, err
 const nodeSelect = `
 SELECT n.id, n.name, n.hostname, n.public_ip, n.labels, n.status, n.profile_id, coalesce(p.name, ''),
        n.overrides, n.enrolled_at, n.last_seen_at, n.agent_version, n.dnsdist_version, n.os, n.arch,
-       n.applied_config_version, n.applied_blocklist_sha256, n.last_error, n.created_at, pv.version
+       n.applied_config_version, n.applied_blocklist_sha256, n.last_error, n.created_at, pv.version,
+       n.dnsdist_candidate, n.dnsdist_available, n.dnsdist_repo_series, n.inventory_at, n.last_upgrade
 FROM nodes n
 LEFT JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
 LEFT JOIN LATERAL (SELECT version FROM config_versions v WHERE v.profile_id = p.id AND v.published
@@ -168,7 +170,9 @@ func (s *svc) queryNodes(ctx context.Context, where string, args ...any) ([]api.
 		var pv *int
 		err := row.Scan(&n.ID, &n.Name, &n.Hostname, &n.PublicIP, &n.Labels, &n.Status, &n.ProfileID, &n.ProfileName,
 			&n.Overrides, &n.EnrolledAt, &n.LastSeenAt, &n.AgentVersion, &n.DnsdistVersion, &n.OS, &n.Arch,
-			&n.AppliedConfigVersion, &n.AppliedBlocklistSHA256, &n.LastError, &n.CreatedAt, &pv)
+			&n.AppliedConfigVersion, &n.AppliedBlocklistSHA256, &n.LastError, &n.CreatedAt, &pv,
+			&n.DnsdistCandidate, &n.DnsdistAvailable, &n.DnsdistRepoSeries, &n.InventoryAt, &n.LastUpgrade)
+		n.AgentOutdated = agentOutdated(n.AgentVersion, s.d.AgentVersion)
 		if pv != nil {
 			v := configVersion(*pv, n.Overrides)
 			n.DesiredConfigVersion = &v
@@ -377,8 +381,34 @@ func (s *svc) cgkLatest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-var commandTypes = []string{api.CmdCGKRefresh, api.CmdRestartDnsdist, api.CmdReapply}
+// agentOutdated: the node runs an agent other than the one embedded in the panel. Unknown
+// on either side (no heartbeat yet, no agent embedded) is not outdated.
+func agentOutdated(node, panel string) bool { return node != "" && panel != "" && node != panel }
 
+func (s *svc) versions(w http.ResponseWriter, r *http.Request) {
+	n, err := s.oneNode(r.Context(), r.PathValue("id"))
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	var inProgress bool
+	if e, ok := s.d.Live.Get(n.ID); ok {
+		inProgress = e.Heartbeat.UpgradeInProgress
+	} else if err := s.d.Pool.QueryRow(r.Context(), `SELECT coalesce((last_heartbeat->>'upgrade_in_progress')::bool, false)
+		FROM nodes WHERE id = $1`, n.ID).Scan(&inProgress); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, api.NodeVersions{
+		Installed: n.DnsdistVersion, Candidate: n.DnsdistCandidate, Available: n.DnsdistAvailable,
+		Series: n.DnsdistRepoSeries, InventoryAt: n.InventoryAt, LastUpgrade: n.LastUpgrade,
+		UpgradeInProgress: inProgress, AgentVersion: n.AgentVersion, PanelAgentVersion: s.d.AgentVersion,
+		AgentOutdated: n.AgentOutdated,
+	})
+}
+
+// command queues a node command. ?force=true allows upgrade_agent on a node whose agent
+// already matches the embedded one (reinstall).
 func (s *svc) command(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), r.PathValue("id")
 	var req api.CommandRequest
@@ -386,17 +416,41 @@ func (s *svc) command(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, err.Error())
 		return
 	}
-	if !slices.Contains(commandTypes, req.Type) {
-		httpx.BadRequest(w, "type must be one of "+strings.Join(commandTypes, ", "))
+	var available []string
+	var agentVer string
+	var busy bool
+	if err := s.d.Pool.QueryRow(ctx, `SELECT dnsdist_available, agent_version,
+			coalesce((last_heartbeat->>'upgrade_in_progress')::bool, false)
+			OR EXISTS (SELECT 1 FROM upgrade_runs WHERE status IN ('running', 'paused'))
+		FROM nodes WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&available, &agentVer, &busy); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	err := req.Validate(available, dnsconf.SupportedSeries)
+	if err == nil && req.Type == api.CmdUpgradeAgent {
+		if s.d.AgentVersion == "" {
+			err = errors.New("type: no agent binary is embedded in this panel build")
+		} else if !agentOutdated(agentVer, s.d.AgentVersion) && r.URL.Query().Get("force") != "true" {
+			err = fmt.Errorf("type: the agent already runs %q (the embedded version); add ?force=true to reinstall", s.d.AgentVersion)
+		}
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusUnprocessableEntity, "invalid_command", err.Error())
+		return
+	}
+	if busy && (strings.HasPrefix(req.Type, "upgrade_") || req.Type == api.CmdSetDnsdistSeries) {
+		httpx.WriteError(w, http.StatusConflict, "upgrade_running",
+			"an upgrade run is active or the node is upgrading; wait for it or abort the run")
 		return
 	}
 	var c api.Command
-	err := pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
-		if err := tx.QueryRow(ctx, `INSERT INTO node_commands (node_id, type, created_by)
-			SELECT id, $2, $3 FROM nodes WHERE id = $1 AND deleted_at IS NULL RETURNING id, type`,
-			id, req.Type, app.UserIDFrom(ctx)).Scan(&c.ID, &c.Type); err != nil {
+	err = pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
+		if err := tx.QueryRow(ctx, `INSERT INTO node_commands (node_id, type, params, created_by)
+			VALUES ($1, $2, jsonb_strip_nulls(jsonb_build_object('version', nullif($3, ''), 'series', nullif($4, ''))), $5)
+			RETURNING id, type`, id, req.Type, req.Version, req.Series, app.UserIDFrom(ctx)).Scan(&c.ID, &c.Type); err != nil {
 			return err
 		}
+		c.Version, c.Series = req.Version, req.Series
 		return audit.Record(r, tx, "node.command", "node", id, c)
 	})
 	if err != nil {

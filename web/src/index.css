@@ -4,6 +4,7 @@
 @custom-variant dark (&:is(.dark *));
 
 :root {
+  /* primary, success, warning, info and destructive are dark enough for >= 4.5:1 as text on their own 15% tint and under white text */
   --radius: 0.625rem;
   --background: oklch(0.985 0 0);
   --foreground: oklch(0.141 0.005 285.823);
@@ -11,7 +12,7 @@
   --card-foreground: oklch(0.141 0.005 285.823);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.55 0.13 170);
+  --primary: oklch(0.48 0.11 170);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -19,12 +20,13 @@
   --muted-foreground: oklch(0.552 0.016 285.938);
   --accent: oklch(0.967 0.001 286.375);
   --accent-foreground: oklch(0.21 0.006 285.885);
-  --destructive: oklch(0.577 0.245 27.325);
-  --success: oklch(0.6 0.15 155);
-  --warning: oklch(0.75 0.16 75);
+  --destructive: oklch(0.51 0.2 27.325);
+  --success: oklch(0.48 0.13 155);
+  --warning: oklch(0.52 0.12 60);
+  --info: oklch(0.5 0.14 250);
   --border: oklch(0.92 0.004 286.32);
   --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.55 0.13 170);
+  --ring: oklch(0.48 0.11 170);
   --chart-1: oklch(0.6 0.13 170);
   --chart-2: oklch(0.6 0.15 250);
   --chart-3: oklch(0.7 0.16 75);
@@ -32,12 +34,12 @@
   --chart-5: oklch(0.63 0.2 25);
   --sidebar: oklch(0.975 0.001 286);
   --sidebar-foreground: oklch(0.3 0.006 285.885);
-  --sidebar-primary: oklch(0.55 0.13 170);
+  --sidebar-primary: oklch(0.48 0.11 170);
   --sidebar-primary-foreground: oklch(0.985 0 0);
   --sidebar-accent: oklch(0.94 0.003 286.32);
   --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
   --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.55 0.13 170);
+  --sidebar-ring: oklch(0.48 0.11 170);
 }
 
 .dark {
@@ -58,6 +60,7 @@
   --destructive: oklch(0.704 0.191 22.216);
   --success: oklch(0.72 0.16 155);
   --warning: oklch(0.8 0.15 80);
+  --info: oklch(0.68 0.15 250);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.72 0.14 170);
@@ -98,6 +101,7 @@
   --color-destructive: var(--destructive);
   --color-success: var(--success);
   --color-warning: var(--warning);
+  --color-info: var(--info);
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);

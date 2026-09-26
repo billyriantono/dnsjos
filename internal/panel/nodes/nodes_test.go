@@ -235,7 +235,7 @@ func TestHeartbeat(t *testing.T) {
 	}
 	var c api.Command
 	e.call(202, "POST", "/api/v1/nodes/"+er.NodeID+"/commands", "admin", api.CommandRequest{Type: api.CmdReapply}, &c)
-	e.call(400, "POST", "/api/v1/nodes/"+er.NodeID+"/commands", "admin", api.CommandRequest{Type: "rm -rf"}, nil)
+	e.call(422, "POST", "/api/v1/nodes/"+er.NodeID+"/commands", "admin", api.CommandRequest{Type: "rm -rf"}, nil)
 
 	dyn := []api.DynBlock{{Client: "192.0.2.7/32", Reason: "rate", Stage: "warning", Blocks: 1}}
 	ack = hb(t0.Add(10*time.Second), 1500, 300, 100, up, dyn)
@@ -305,6 +305,106 @@ func TestHeartbeat(t *testing.T) {
 	if live.Heartbeat == nil || live.Heartbeat.Counters.Queries != 300 || live.ReceivedAt == nil {
 		t.Fatalf("live after restart: %+v", live)
 	}
+}
+
+// Regression: a heartbeat sent while dnsdist was down carries zero counters; it must not
+// become the baseline, or the next good heartbeat books dnsdist's lifetime totals.
+func TestHeartbeatDnsdistDown(t *testing.T) {
+	e := setup(t)
+	er := e.enroll("ns1")
+	t0 := time.Now().UTC()
+	for i, c := range []struct {
+		running bool
+		q, sum  int64
+	}{{true, 1000, 0}, {false, 0, 0}, {true, 5000, 0}, {true, 5100, 100}} {
+		e.call(200, "POST", "/agent/v1/heartbeat", er.NodeToken, api.Heartbeat{Time: t0.Add(time.Duration(i) * 10 * time.Second),
+			DnsdistRunning: c.running, Counters: api.Counters{Queries: c.q}}, nil)
+		var sum int64
+		e.scalar("SELECT coalesce(sum(queries), 0) FROM metrics_minutely WHERE node_id = $1", &sum, er.NodeID)
+		if sum != c.sum {
+			t.Fatalf("heartbeat %d: booked %d queries, want %d", i, sum, c.sum)
+		}
+	}
+}
+
+func TestUpgradeCommands(t *testing.T) {
+	e := setup(t)
+	e.d.AgentVersion = "1.1"
+	er := e.enroll("ns1")
+	path := "/api/v1/nodes/" + er.NodeID
+	now := time.Now().UTC().Truncate(time.Second)
+	last := &api.UpgradeResult{Kind: api.UpgradeDnsdist, From: "2.0.0-1", To: "2.0.0-1", OK: true, At: now}
+	hb := func(inv bool, inProgress bool) api.HeartbeatAck {
+		h := api.Heartbeat{Time: time.Now(), AgentVersion: "1.0", DnsdistVersion: "2.0.0-1", DnsdistRunning: true,
+			LastUpgrade: last, UpgradeInProgress: inProgress}
+		if inv {
+			h.DnsdistCandidate, h.DnsdistAvailable, h.DnsdistRepoSeries, h.InventoryAt = "2.0.1-1", []string{"2.0.0-1", "2.0.1-1"}, "20", &now
+		}
+		var ack api.HeartbeatAck
+		e.call(200, "POST", "/agent/v1/heartbeat", er.NodeToken, h, &ack)
+		return ack
+	}
+	var n api.Node
+	e.call(200, "GET", path, "admin", nil, &n)
+	if n.DnsdistAvailable == nil || len(n.DnsdistAvailable) != 0 || n.InventoryAt != nil || n.AgentOutdated {
+		t.Fatalf("fresh node: %+v", n)
+	}
+	hb(true, false)
+	hb(false, false) // a restarted agent without inventory keeps the stored one
+	e.call(200, "GET", path, "admin", nil, &n)
+	if n.DnsdistCandidate != "2.0.1-1" || len(n.DnsdistAvailable) != 2 || n.DnsdistRepoSeries != "20" ||
+		n.InventoryAt == nil || !n.InventoryAt.Equal(now) || n.LastUpgrade == nil || *n.LastUpgrade != *last || !n.AgentOutdated {
+		t.Fatalf("node inventory: %+v", n)
+	}
+	var v api.NodeVersions
+	e.call(200, "GET", path+"/versions", "admin", nil, &v)
+	if v.Installed != "2.0.0-1" || v.Candidate != "2.0.1-1" || len(v.Available) != 2 || v.Series != "20" ||
+		v.AgentVersion != "1.0" || v.PanelAgentVersion != "1.1" || !v.AgentOutdated || v.UpgradeInProgress {
+		t.Fatalf("versions: %+v", v)
+	}
+	e.call(404, "GET", "/api/v1/nodes/00000000-0000-0000-0000-000000000000/versions", "admin", nil, nil)
+
+	for _, bad := range []api.CommandRequest{{Type: "nuke"}, {Type: api.CmdUpgradeDnsdist}, {Type: api.CmdUpgradeDnsdist, Version: "9.9"},
+		{Type: api.CmdSetDnsdistSeries, Series: "19"}, {Type: api.CmdReapply, Version: "2.0.1-1"}} {
+		var eb api.ErrorBody
+		e.call(422, "POST", path+"/commands", "admin", bad, &eb)
+		if eb.Error.Code != "invalid_command" {
+			t.Errorf("%+v: %+v", bad, eb)
+		}
+	}
+	var up, series, agent api.Command
+	e.call(202, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdUpgradeDnsdist, Version: "2.0.1-1"}, &up)
+	e.call(202, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdSetDnsdistSeries, Series: "21"}, &series)
+	e.call(202, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdUpgradeAgent}, &agent)
+	ack := hb(false, false)
+	if len(ack.Commands) != 3 || ack.Commands[0] != up || ack.Commands[1] != series || ack.Commands[2] != agent ||
+		up.Version != "2.0.1-1" || series.Series != "21" {
+		t.Fatalf("delivered %+v", ack.Commands)
+	}
+	var audits int
+	e.scalar("SELECT count(*) FROM audit_log WHERE action = 'node.command' AND details->>'version' = '2.0.1-1'", &audits)
+	if audits != 1 {
+		t.Errorf("audit rows %d", audits)
+	}
+
+	e.d.AgentVersion = "1.0" // up to date: only with force
+	e.call(422, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdUpgradeAgent}, nil)
+	e.call(202, "POST", path+"/commands?force=true", "admin", api.CommandRequest{Type: api.CmdUpgradeAgent}, nil)
+	e.d.AgentVersion = ""
+	e.call(422, "POST", path+"/commands?force=true", "admin", api.CommandRequest{Type: api.CmdUpgradeAgent}, nil)
+
+	hb(false, true) // node upgrading: no other upgrade command, other commands still fine
+	var eb api.ErrorBody
+	e.call(409, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdUpgradeDnsdist, Version: "2.0.1-1"}, &eb)
+	e.call(200, "GET", path+"/versions", "admin", nil, &v)
+	if eb.Error.Code != "upgrade_running" || !v.UpgradeInProgress {
+		t.Fatalf("in progress: %+v %+v", eb, v)
+	}
+	e.call(202, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdReapply}, nil)
+	hb(false, false)
+	e.run("INSERT INTO upgrade_runs (kind, status) VALUES ('agent', 'paused')") // a paused run owns the fleet
+	e.call(409, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdSetDnsdistSeries, Series: "21"}, nil)
+	e.call(202, "POST", path+"/commands", "admin", api.CommandRequest{Type: api.CmdCheckUpdates}, nil)
 }
 
 func TestStatusJob(t *testing.T) {

@@ -104,3 +104,35 @@ func TestSpecJSONShape(t *testing.T) {
 		}
 	}
 }
+
+func TestCommandValidate(t *testing.T) {
+	avail, series := []string{"2.0.1-1pdns.bookworm"}, []string{"20", "21"}
+	ok := []CommandRequest{{Type: CmdReapply}, {Type: CmdCheckUpdates}, {Type: CmdUpgradeAgent},
+		{Type: CmdUpgradeDnsdist, Version: avail[0]}, {Type: CmdSetDnsdistSeries, Series: "21"}}
+	bad := []CommandRequest{{Type: "nuke"}, {Type: CmdUpgradeDnsdist}, {Type: CmdUpgradeDnsdist, Version: "9.9"},
+		{Type: CmdSetDnsdistSeries, Series: "19"}, {Type: CmdSetDnsdistSeries}, {Type: CmdReapply, Version: avail[0]},
+		{Type: CmdUpgradeDnsdist, Version: avail[0], Series: "21"}}
+	for _, r := range ok {
+		if err := r.Validate(avail, series); err != nil {
+			t.Errorf("%+v: %v", r, err)
+		}
+	}
+	for _, r := range bad {
+		if r.Validate(avail, series) == nil {
+			t.Errorf("%+v: expected error", r)
+		}
+	}
+}
+
+func TestUpgradeRunCreateValidate(t *testing.T) {
+	for _, c := range []UpgradeRunCreate{{Kind: UpgradeAgent}, {Kind: UpgradeDnsdist, TargetVersion: "2.0.1", NodeIDs: []string{"a", "b"}}} {
+		if err := c.Validate(); err != nil {
+			t.Errorf("%+v: %v", c, err)
+		}
+	}
+	for _, c := range []UpgradeRunCreate{{Kind: "os"}, {Kind: UpgradeDnsdist}, {Kind: UpgradeAgent, NodeIDs: []string{"a", "a"}}} {
+		if c.Validate() == nil {
+			t.Errorf("%+v: expected error", c)
+		}
+	}
+}

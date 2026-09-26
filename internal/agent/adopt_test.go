@@ -40,7 +40,7 @@ func TestAdoptOOTB(t *testing.T) {
 	}
 	patch, _ := json.Marshal(a.Overrides)
 	want := `{"listen":{"do53":{"addresses":["0.0.0.0:53","[::]:53"]},` +
-		`"doh":{"addresses":["0.0.0.0:443","[::]:443"],"enabled":true},"dot":{"addresses":["0.0.0.0:853","[::]:853"],"enabled":true},` +
+		`"doh":{"addresses":["0.0.0.0:443","[::]:443"],"enabled":true,"path":"/dns-query"},"dot":{"addresses":["0.0.0.0:853","[::]:853"],"enabled":true},` +
 		`"tls":{"cert_file":"/etc/dnsdist/tls/cert.pem","key_file":"/etc/dnsdist/tls/key.pem"}},` +
 		`"webserver":{"listen":"0.0.0.0:8083","prometheus_acl":["127.0.0.1/8","198.51.100.16/29","198.51.100.8/29","198.51.100.24/29","198.51.100.32/29"]}}`
 	if string(patch) != want {

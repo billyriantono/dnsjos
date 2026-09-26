@@ -25,6 +25,9 @@ type Deps struct {
 	Settings *Settings
 	Jobs     *jobs.Scheduler
 	Version  string
+	// AgentVersion is the version of the agent binaries embedded in the panel ("" when
+	// none are embedded); nodes running anything else are agent_outdated (SPEC §18).
+	AgentVersion string
 }
 
 // LiveEntry is the latest heartbeat of a node.

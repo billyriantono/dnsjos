@@ -18,9 +18,11 @@ import (
 	"github.com/billyriantono/dnsjos/internal/panel/configs"
 	"github.com/billyriantono/dnsjos/internal/panel/db"
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
+	"github.com/billyriantono/dnsjos/internal/panel/install"
 	"github.com/billyriantono/dnsjos/internal/panel/jobs"
 	"github.com/billyriantono/dnsjos/internal/panel/nodes"
 	"github.com/billyriantono/dnsjos/internal/panel/reports"
+	"github.com/billyriantono/dnsjos/internal/panel/upgrades"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
 
@@ -51,6 +53,8 @@ func Run(ctx context.Context, cfg config.Config, log *slog.Logger, version strin
 		Settings: app.NewSettings(pool, cfg.PublicURL),
 		Jobs:     sched,
 		Version:  version,
+
+		AgentVersion: install.AgentVersion(),
 	}
 	if err := d.Settings.Load(ctx); err != nil {
 		return fmt.Errorf("load settings: %w", err)
@@ -112,6 +116,7 @@ func Handler(d *app.Deps) http.Handler {
 	configs.Register(r, d)
 	blocklist.Register(r, d)
 	reports.Register(r, d)
+	upgrades.Register(r, d)
 	r.Public("/", spaHandler())
 
 	var h http.Handler = r

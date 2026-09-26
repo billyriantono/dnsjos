@@ -41,7 +41,10 @@ type agent struct {
 	spool *dnstap.Spool
 	host  string
 	os    string
-	opMu  sync.Mutex // serialises apply and restarts
+	opMu  sync.Mutex // serialises apply, restarts and dnsdist upgrades
+	aptMu sync.Mutex // one apt/dpkg operation at a time
+	run   Runner
+	stop  context.CancelCauseFunc
 	start time.Time
 
 	mu         sync.Mutex
@@ -55,8 +58,11 @@ type agent struct {
 	cgkForce   bool
 	acks       []int64
 	dnsdistVer string
+	inv        inventory
+	lastUp     *api.UpgradeResult
+	upgrading  bool
 
-	pollNow, forceNow, blNow, cgkNow, hbNow chan struct{}
+	pollNow, forceNow, blNow, cgkNow, hbNow, invNow chan struct{}
 }
 
 // Run runs the agent until ctx is cancelled.
@@ -66,14 +72,19 @@ func Run(ctx context.Context, o Options) error {
 		return err
 	}
 	a.cgkStatus = a.cgkFiles()
+	a.loadLastUpgrade()
+	ctx, a.stop = context.WithCancelCause(ctx)
 	o.Log.Info("agent starting", "version", o.Version, "panel", a.cl.BaseURL, "root", o.Root, "no_systemd", o.NoSystemd)
 
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.cgkLoop} {
+	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.cgkLoop, a.inventoryLoop} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
 	wg.Wait()
+	if err := context.Cause(ctx); errors.Is(err, ErrRestart) {
+		return err
+	}
 	o.Log.Info("agent stopped")
 	return nil
 }
@@ -100,10 +111,11 @@ func newAgent(ctx context.Context, o Options) (*agent, error) {
 			NoSystemd: o.NoSystemd, Log: o.Log},
 		bl:  &blocklist.Syncer{Client: cl, Path: o.path(CDBPath)},
 		agg: &dnstap.Agg{Cap: dnstapCap},
-		os:  osName(), dnsdistVer: dnsdist.Version(ctx),
-		pollNow: make(chan struct{}, 1), forceNow: make(chan struct{}, 1),
-		blNow: make(chan struct{}, 1), cgkNow: make(chan struct{}, 1), hbNow: make(chan struct{}, 1),
+		os:  osName(), run: execRunner, inv: inventory{Available: []string{}},
+		pollNow: make(chan struct{}, 1), forceNow: make(chan struct{}, 1), blNow: make(chan struct{}, 1),
+		cgkNow: make(chan struct{}, 1), hbNow: make(chan struct{}, 1), invNow: make(chan struct{}, 1),
 	}
+	a.dnsdistVer = dnsdistVersion(ctx, a.run)
 	a.host, _ = os.Hostname()
 	a.spool = &dnstap.Spool{Dir: o.path(SpoolDir), Post: cl.PostBlocked, Log: o.Log}
 	return a, nil
@@ -196,7 +208,7 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	}
 	a.applied, a.applyErr = cfg.Version, ""
 	if changed {
-		a.dnsdistVer = dnsdist.Version(ctx)
+		a.dnsdistVer = dnsdistVersion(ctx, a.run)
 		a.o.Log.Info("config applied", "version", cfg.Version, "profile", cfg.Profile)
 		poke(a.hbNow) // let the panel see the new version right away
 	}
@@ -285,14 +297,19 @@ func (a *agent) webURL() string {
 	if c := a.config(); c != nil && c.Spec.Webserver.Listen != "" {
 		listen = c.Spec.Webserver.Listen
 	}
+	return "http://" + loopback(listen)
+}
+
+// loopback maps a wildcard listen address to the loopback address of its family.
+func loopback(listen string) string {
 	if ap, err := netip.ParseAddrPort(listen); err == nil && ap.Addr().IsUnspecified() {
 		lo := netip.IPv6Loopback()
 		if ap.Addr().Is4() {
 			lo = netip.AddrFrom4([4]byte{127, 0, 0, 1})
 		}
-		listen = netip.AddrPortFrom(lo, ap.Port()).String()
+		return netip.AddrPortFrom(lo, ap.Port()).String()
 	}
-	return "http://" + listen
+	return listen
 }
 
 func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
@@ -305,6 +322,8 @@ func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
 	hb.DnsdistVersion, hb.AppliedConfigVersion, hb.ApplyError, hb.BlocklistError = a.dnsdistVer, a.applied, a.applyErr, a.blErr
 	hb.CGK = a.cgkStatus
 	hb.AckedCommands = slices.Clone(a.acks)
+	hb.DnsdistCandidate, hb.DnsdistAvailable, hb.DnsdistRepoSeries = a.inv.Candidate, slices.Clone(a.inv.Available), a.inv.Series
+	hb.InventoryAt, hb.LastUpgrade, hb.UpgradeInProgress = a.inv.At, a.lastUp, a.upgrading
 	a.mu.Unlock()
 	return hb
 }
@@ -341,7 +360,7 @@ func (a *agent) heartbeat(ctx context.Context) {
 
 // command dispatches a panel command; it is acked with the next heartbeat.
 func (a *agent) command(ctx context.Context, c api.Command) {
-	a.o.Log.Info("command received", "id", c.ID, "type", c.Type)
+	a.o.Log.Info("command received", "id", c.ID, "type", c.Type, "version", c.Version, "series", c.Series)
 	switch c.Type {
 	case api.CmdCGKRefresh:
 		a.mu.Lock()
@@ -356,6 +375,18 @@ func (a *agent) command(ctx context.Context, c api.Command) {
 			defer a.opMu.Unlock()
 			if err := a.app.Restart(ctx); err != nil {
 				a.o.Log.Error("restart dnsdist failed", "err", err)
+			}
+		}()
+	case api.CmdCheckUpdates:
+		poke(a.invNow)
+	case api.CmdUpgradeDnsdist:
+		go a.upgrade(func() *api.UpgradeResult { return a.upgradeDnsdist(ctx, c.Version) })
+	case api.CmdUpgradeAgent:
+		go a.upgrade(func() *api.UpgradeResult { return a.upgradeAgent(ctx) })
+	case api.CmdSetDnsdistSeries:
+		go func() {
+			if err := a.setSeries(ctx, c.Series); err != nil {
+				a.o.Log.Error("set_dnsdist_series failed", "err", err)
 			}
 		}()
 	default:

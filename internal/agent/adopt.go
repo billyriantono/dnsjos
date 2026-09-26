@@ -94,7 +94,7 @@ type adoption struct {
 }
 
 // adoptOOTB extracts the secrets and the node-specific settings (listen addresses, web
-// listener + ACL, DoH/DoT certificates) from a dnsdist_ootb config. ACL, upstreams and
+// listener + ACL, DoH/DoT certificates, DoH path) from a dnsdist_ootb config. ACL, upstreams and
 // blocking come from the profile.
 func adoptOOTB(path string) (adoption, error) {
 	y, err := parseOOTB(path)
@@ -128,6 +128,9 @@ func adoptOOTB(path string) (adoption, error) {
 		if len(addrs) > 0 {
 			o["addresses"] = addrs
 			cert, key = y["services."+svc+".cert"], y["services."+svc+".key"]
+		}
+		if p := y["services."+svc+".path"]; svc == "doh" && p != "" {
+			o["path"] = p
 		}
 		lst[svc] = o
 	}

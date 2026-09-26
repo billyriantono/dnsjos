@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/billyriantono/dnsjos/internal/agent/client"
-	"github.com/billyriantono/dnsjos/internal/agent/dnsdist"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
 
@@ -70,7 +69,7 @@ func Enroll(ctx context.Context, o Options, panelURL, token, name string, adopt 
 	}
 	req := api.EnrollRequest{
 		Token: token, Hostname: host, OS: osName(), Arch: runtime.GOARCH,
-		AgentVersion: o.Version, DnsdistVersion: dnsdist.Version(ctx),
+		AgentVersion: o.Version, DnsdistVersion: dnsdistVersion(ctx, execRunner),
 	}
 	var ad adoption
 	if adopt {

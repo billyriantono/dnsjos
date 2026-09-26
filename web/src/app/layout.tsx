@@ -2,6 +2,7 @@ import type { IconType } from 'react-icons'
 import {
   LuFileChartColumn,
   LuLayoutDashboard,
+  LuPackageCheck,
   LuScrollText,
   LuServer,
   LuSettings,
@@ -45,6 +46,7 @@ const monitor: NavItem[] = [
   { to: '/reports', label: 'Reports', icon: LuFileChartColumn },
   { to: '/offenders', label: 'Offenders', icon: LuSiren },
 ]
+const fleet: NavItem[] = [{ to: '/upgrades', label: 'Upgrades', icon: LuPackageCheck }]
 const configure: NavItem[] = [
   { to: '/profiles', label: 'Profiles', icon: LuSlidersHorizontal },
   { to: '/blocklist', label: 'Blocklist', icon: LuShieldBan },
@@ -120,6 +122,7 @@ export function AppLayout() {
         </SidebarHeader>
         <SidebarContent>
           <NavGroup label="Monitor" items={monitor} />
+          <NavGroup label="Fleet" items={fleet} />
           <NavGroup label="Configure" items={configure} />
           {isAdmin && <NavGroup label="Admin" items={admin} />}
         </SidebarContent>
@@ -135,9 +138,10 @@ export function AppLayout() {
             <UserMenu />
           </div>
         </header>
-        <main className="mx-auto w-full max-w-[1600px] flex-1 space-y-6 p-4 md:p-6">
+        {/* SidebarInset is already the <main> landmark */}
+        <div className="mx-auto w-full max-w-[1600px] flex-1 space-y-6 p-4 md:p-6">
           <Outlet />
-        </main>
+        </div>
       </SidebarInset>
     </SidebarProvider>
   )

@@ -149,7 +149,7 @@ func DefaultConfigSpec() ConfigSpec {
 		},
 		Cache: Cache{Enabled: true, MaxEntries: 500000, MinTTL: 0, MaxTTL: 86400, StaleTTL: 60},
 		Blocking: Blocking{
-			Enabled:          true,
+			Enabled: true,
 			// Documentation addresses (RFC 5737 / RFC 3849): set your own blockpage server.
 			BlockpageIPv4:    "192.0.2.10",
 			BlockpageIPv6:    "2001:db8::10",

@@ -133,7 +133,9 @@ func TestEndToEnd(t *testing.T) {
 	var tok api.EnrollmentTokenCreated
 	p.must(201, "POST", "/api/v1/enrollment-tokens", api.EnrollmentTokenCreate{NodeName: "e2e-node"}, &tok)
 	run(t, "", nil, agentBin, "enroll", "--panel", p.base, "--token", tok.Token, "--root", root, "--no-systemd")
-	var ac struct{ NodeID string `json:"node_id"` }
+	var ac struct {
+		NodeID string `json:"node_id"`
+	}
 	readJSON(t, filepath.Join(root, "etc/dnsjos/agent.json"), &ac)
 	conf := filepath.Join(root, "etc/dnsdist/dnsdist.conf")
 	superviseDnsdist(t, conf, filepath.Join(tmp, "dnsdist.log"))
@@ -248,7 +250,9 @@ func adoptDryRun(t *testing.T, p *panel, repo, agentBin, root, db string) {
 	if sec.ConsoleKey != "dGVzdC1jb25zb2xlLWtleS0zMi1ieXRlcy0tLS0tLS0=" || sec.WebPassword != "test-web-password" || sec.WebAPIKey != "test-api-key" {
 		t.Errorf("imported secrets: %+v", sec)
 	}
-	var ac struct{ NodeID string `json:"node_id"` }
+	var ac struct {
+		NodeID string `json:"node_id"`
+	}
 	readJSON(t, filepath.Join(root, "etc/dnsjos/agent.json"), &ac)
 	var node api.Node
 	p.must(200, "GET", "/api/v1/nodes/"+ac.NodeID, nil, &node)
@@ -257,7 +261,7 @@ func adoptDryRun(t *testing.T, p *panel, repo, agentBin, root, db string) {
 	wantOver := map[string]any{
 		"listen": map[string]any{
 			"do53": map[string]any{"addresses": []any{"0.0.0.0:53", "[::]:53"}},
-			"doh":  map[string]any{"enabled": true, "addresses": []any{"0.0.0.0:443", "[::]:443"}},
+			"doh":  map[string]any{"enabled": true, "addresses": []any{"0.0.0.0:443", "[::]:443"}, "path": "/dns-query"},
 			"dot":  map[string]any{"enabled": true, "addresses": []any{"0.0.0.0:853", "[::]:853"}},
 			"tls":  map[string]any{"cert_file": cert, "key_file": key},
 		},

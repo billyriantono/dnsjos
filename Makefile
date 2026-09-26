@@ -19,7 +19,8 @@ web:
 	pnpm -C web install --frozen-lockfile
 	pnpm -C web build
 
-# Stripped static agents for the installer (/dl/agent/linux/<arch> + .sha256).
+# Stripped static agents for the installer (/dl/agent/linux/<arch> + .sha256), plus
+# dnsjos-agent.version: the panel reads it to flag nodes with an outdated agent (SPEC §18).
 agent:
 	@for arch in $(ARCHES); do \
 		echo "agent linux/$$arch"; \
@@ -27,6 +28,7 @@ agent:
 			-o $(AGENT_BIN)/dnsjos-agent-linux-$$arch ./cmd/dnsjos-agent || exit 1; \
 		(cd $(AGENT_BIN) && $(SHA256) dnsjos-agent-linux-$$arch | cut -d' ' -f1 > dnsjos-agent-linux-$$arch.sha256) || exit 1; \
 	done
+	echo "$(VERSION)" > $(AGENT_BIN)/dnsjos-agent.version
 
 # Embeds the Vite build (web/dist → webdist/dist, never committed) with -tags release.
 # Without a web build a plain `go build` embeds webdist/placeholder instead.
@@ -57,7 +59,7 @@ hooks:
 	install -m 0755 scripts/pre-push .git/hooks/pre-push
 
 clean:
-	rm -rf bin $(AGENT_BIN)/dnsjos-agent-*
+	rm -rf bin $(AGENT_BIN)/dnsjos-agent-* $(AGENT_BIN)/dnsjos-agent.version
 	rm -rf webdist/dist
 
 fmt:

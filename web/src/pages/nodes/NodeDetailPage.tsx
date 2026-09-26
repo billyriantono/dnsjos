@@ -12,6 +12,8 @@ import { NodeActionsTab } from '@/components/nodes/NodeActionsTab'
 import { NodeCGKTab } from '@/components/nodes/NodeCGKTab'
 import { NodeConfigTab } from '@/components/nodes/NodeConfigTab'
 import { NodeOverviewTab } from '@/components/nodes/NodeOverviewTab'
+import { NodeVersionsTab } from '@/components/nodes/NodeVersionsTab'
+import { updateAvailable } from '@/components/upgrades/versions'
 import { SyncBadge } from '@/components/nodes/NodesTable'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -131,6 +133,10 @@ export default function NodeDetailPage() {
           </TabsTrigger>
           <TabsTrigger value="cgk">CGK</TabsTrigger>
           <TabsTrigger value="config">Config</TabsTrigger>
+          <TabsTrigger value="versions">
+            Versions
+            {(updateAvailable(node) || node.agent_outdated) && <span className="size-1.5 rounded-full bg-primary" aria-label="update available" />}
+          </TabsTrigger>
           {isAdmin && <TabsTrigger value="actions">Actions</TabsTrigger>}
         </TabsList>
         <TabsContent value="overview" className="mt-2">
@@ -144,6 +150,9 @@ export default function NodeDetailPage() {
         </TabsContent>
         <TabsContent value="config" className="mt-2">
           <NodeConfigTab key={node.id} node={node} />
+        </TabsContent>
+        <TabsContent value="versions" className="mt-2">
+          <NodeVersionsTab node={node} />
         </TabsContent>
         {isAdmin && (
           <TabsContent value="actions" className="mt-2">

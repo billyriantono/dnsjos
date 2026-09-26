@@ -179,7 +179,9 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 		var prev *api.Heartbeat
 		if prevRaw != nil {
 			prev = new(api.Heartbeat)
-			if json.Unmarshal(prevRaw, prev) != nil {
+			// A heartbeat with dnsdist down carries zero counters, not a baseline: using it
+			// would book dnsdist's lifetime totals as one interval's traffic.
+			if json.Unmarshal(prevRaw, prev) != nil || !prev.DnsdistRunning {
 				prev = nil
 			}
 		}
@@ -240,6 +242,9 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if err := storeUpgradeState(ctx, tx, id, &hb); err != nil {
+			return err
+		}
 		if err := upsertBackends(ctx, tx, id, hb.Backends); err != nil {
 			return err
 		}
@@ -254,7 +259,8 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		rows, _ := tx.Query(ctx, `UPDATE node_commands SET delivered_at = now()
-			WHERE node_id = $1 AND delivered_at IS NULL RETURNING id, type`, id)
+			WHERE node_id = $1 AND delivered_at IS NULL
+			RETURNING id, type, coalesce(params->>'version', ''), coalesce(params->>'series', '')`, id)
 		cmds, err := pgx.CollectRows(rows, pgx.RowToStructByPos[api.Command])
 		if err != nil {
 			return err
@@ -282,6 +288,29 @@ func (s *svc) heartbeat(w http.ResponseWriter, r *http.Request) {
 		s.mu.Unlock()
 	}
 	httpx.WriteJSON(w, http.StatusOK, ack)
+}
+
+// storeUpgradeState copies the §18 inventory (only once the agent has refreshed it, so a
+// restarted agent does not blank it) and the last upgrade result onto the node.
+func storeUpgradeState(ctx context.Context, tx pgx.Tx, id string, hb *api.Heartbeat) error {
+	if hb.InventoryAt != nil {
+		avail := make([]string, 0, len(hb.DnsdistAvailable))
+		for _, v := range hb.DnsdistAvailable[:min(len(hb.DnsdistAvailable), 500)] {
+			avail = append(avail, clip(v, 128))
+		}
+		if _, err := tx.Exec(ctx, `UPDATE nodes SET dnsdist_candidate = $2, dnsdist_available = $3,
+			dnsdist_repo_series = $4, inventory_at = $5 WHERE id = $1`,
+			id, clip(hb.DnsdistCandidate, 128), avail, clip(hb.DnsdistRepoSeries, 16), hb.InventoryAt); err != nil {
+			return err
+		}
+	}
+	if u := hb.LastUpgrade; u != nil {
+		u.Kind, u.From, u.To, u.Error = clip(u.Kind, 16), clip(u.From, 128), clip(u.To, 128), clip(u.Error, 4000)
+		if _, err := tx.Exec(ctx, "UPDATE nodes SET last_upgrade = $2 WHERE id = $1", id, u); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // liveRate derives qps and cache hit ratio from two consecutive heartbeats.

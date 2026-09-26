@@ -152,6 +152,11 @@ func (a *Applier) Restart(ctx context.Context) error {
 			return fmt.Errorf("systemctl restart dnsdist: %w: %s", err, bytes.TrimSpace(out))
 		}
 	}
+	return a.WaitConsole(ctx)
+}
+
+// WaitConsole waits up to Verify (20 s) until the dnsdist console answers showVersion().
+func (a *Applier) WaitConsole(ctx context.Context) error {
 	wait := a.Verify
 	if wait <= 0 {
 		wait = 20 * time.Second
@@ -166,7 +171,7 @@ func (a *Applier) Restart(ctx context.Context) error {
 			return nil
 		}
 		if time.Now().After(deadline) || ctx.Err() != nil {
-			return fmt.Errorf("dnsdist console not answering after restart: %w", err)
+			return fmt.Errorf("dnsdist console not answering: %w", err)
 		}
 		select {
 		case <-ctx.Done():

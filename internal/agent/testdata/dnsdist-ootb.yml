@@ -9,6 +9,7 @@ services:
   doh:
     ip4: 0.0.0.0
     ip6: '[::]'
+    path: /dns-query
     cert: /etc/dnsdist/tls/cert.pem
     key: <redacted>
   dot:

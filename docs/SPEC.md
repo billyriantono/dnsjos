@@ -357,7 +357,12 @@ All agent requests carry `Authorization: Bearer <node_token>` and
   "backends": [{"address": "", "name": "", "pool": "", "state": "up", "weight": 1, "order": 1,
                 "qps": 0, "latency_ms": 0, "queries": 0, "drops": 0}],
   "dynblocks": [{"client": "1.2.3.4/32", "reason": "", "stage": "blocked", "seconds_left": 0, "blocks": 0}],
-  "cgk": {"aliases": 8, "rewrite_ranges": 9, "last_refresh": "RFC3339", "last_error": ""}
+  "cgk": {"aliases": 8, "rewrite_ranges": 9, "last_refresh": "RFC3339", "last_error": ""},
+  // upgrade inventory (§18): cached result of the last refresh, repeated every heartbeat
+  "dnsdist_candidate": "", "dnsdist_available": [], "dnsdist_repo_series": "20",
+  "inventory_at": null,                      // RFC3339, null until the first refresh
+  "last_upgrade": null,                      // {kind: "dnsdist"|"agent", from, to, ok, error, at}
+  "upgrade_in_progress": false
 }
 ```
 
@@ -368,9 +373,13 @@ upsert `backend_status`; open/refresh/close `offender_events`. A node is `offlin
 3 × heartbeat interval without heartbeat (job every 15 s), `degraded` when dnsdist is not
 running, apply/blocklist error, or any backend down.
 
-`commands[]` (optional): `{"type": "cgk_refresh"}`, `{"type": "restart_dnsdist"}`,
-`{"type": "reapply"}` — queued by the UI, delivered once, acked by next heartbeat
-(`acked_commands` field in Heartbeat).
+`commands[]` (optional): `api.Command{id, type, version?, series?}` — types (`api.CommandTypes`)
+`cgk_refresh`, `restart_dnsdist`, `reapply`, and for §18 `check_updates`,
+`upgrade_dnsdist` (+ `version`), `set_dnsdist_series` (+ `series`), `upgrade_agent` —
+queued by the UI (params stored in `node_commands.params`), delivered once, acked by next
+heartbeat (`acked_commands` field in Heartbeat). Upgrade commands are acked when started;
+their outcome arrives later as `last_upgrade`. Panel ingest stores the inventory fields and
+`last_upgrade` in the `nodes` columns of the same name.
 
 ---
 
@@ -438,10 +447,15 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 |---|---|
 | `GET /api/v1/overview` | `Overview` — nodes by status, total qps, cache hit ratio, blocked last 24 h, current build, active offenders |
 | `GET /api/v1/overview/metrics?from&to&step` | `MetricSeries` — fleet timeseries: every `metrics_minutely` column summed over all nodes per step (`latency_avg_ms` = query-weighted mean) plus derived `qps` and `cache_hit_ratio` per point; empty buckets present with zeros |
-| `GET /api/v1/nodes` · `GET /nodes/{id}` · `PATCH /nodes/{id}` · `DELETE /nodes/{id}` | `List[Node]` · `Node` · `NodePatch{name,labels,profile_id,overrides}` → `Node` · 204. `profile_id: ""` = follow `default`; `overrides: null` or `{}` clears them; other overrides are merged over the profile and validated → 422 `invalid_config` with the validation message |
+| `GET /api/v1/nodes` · `GET /nodes/{id}` · `PATCH /nodes/{id}` · `DELETE /nodes/{id}` | `List[Node]` (incl. §18 inventory fields and `agent_outdated`) · `Node` · `NodePatch{name,labels,profile_id,overrides}` → `Node` · 204. `profile_id: ""` = follow `default`; `overrides: null` or `{}` clears them; other overrides are merged over the profile and validated → 422 `invalid_config` with the validation message |
 | `GET /api/v1/nodes/{id}/live` | `NodeLive` — latest heartbeat (in-memory) |
 | `GET /api/v1/nodes/{id}/metrics?from&to&step` | `MetricSeries` for one node (404 for an unknown node) |
-| `POST /api/v1/nodes/{id}/commands` | `CommandRequest{type}` (cgk_refresh / restart_dnsdist / reapply) → 202 `Command` |
+| `POST /api/v1/nodes/{id}/commands` | admin: `CommandRequest{type,version,series}` → 202 `Command`; type ∈ `api.CommandTypes`; params validated by `CommandRequest.Validate(node.dnsdist_available, dnsconf.SupportedSeries)`: `version` required for (and only for) `upgrade_dnsdist` and must be one of the node's `dnsdist_available`, `series` required for (and only for) `set_dnsdist_series` and must be in `dnsconf.SupportedSeries` → 422 `invalid_command`; `upgrade_agent` → 422 unless the node's agent is outdated (or `?force=true`) and an agent is embedded; 409 `upgrade_running` for `upgrade_*`/`set_dnsdist_series` while an upgrade run is active or the node reports `upgrade_in_progress` |
+| `GET /api/v1/nodes/{id}/versions` | `NodeVersions{installed,candidate,available,series,inventory_at,last_upgrade,upgrade_in_progress,agent_version,panel_agent_version,agent_outdated}` (404 unknown node) |
+| `GET /api/v1/upgrades` · `GET /upgrades/{id}` | `List[UpgradeRun]` (newest first, each with ordered `steps`) · `UpgradeRun` (404) |
+| `POST /api/v1/upgrades` | admin: `UpgradeRunCreate{kind,target_version,node_ids}` → 201 `UpgradeRun`; 422 `invalid_upgrade` (`UpgradeRunCreate.Validate`, unknown node, dnsdist `target_version` not in a node's `dnsdist_available`, agent `target_version` ≠ embedded agent version); 409 `upgrade_running` (a run is `running`/`paused`); 409 `nodes_not_ready` (any live node `offline`/`degraded`/`pending`, message lists them) |
+| `POST /api/v1/upgrades/{id}/pause` · `/resume` · `/abort` | admin: → `UpgradeRun`; 409 `invalid_state` unless running→paused, paused→running (resume re-checks node health → 409 `nodes_not_ready`), running/paused→aborted |
+| `GET /api/v1/meta` | `Meta{panel_version, agent_version, supported_series}` — `agent_version` = embedded agent binaries |
 | `GET /api/v1/nodes/{id}/cgk` | `CGKReport` from the node's latest `POST /agent/v1/cgk`, or `null` |
 | `GET /api/v1/nodes/{id}/config/rendered` | `RenderedConfig` — effective spec + rendered files (secrets masked) |
 | `GET /api/v1/enrollment-tokens` · `POST` · `DELETE /{id}` | `List[EnrollmentToken]` · `EnrollmentTokenCreate{node_name,labels,profile_id,ttl_hours}` → 201 `EnrollmentTokenCreated{id,token,install_command,expires_at}` · 204 |
@@ -567,7 +581,10 @@ Never touches an existing `/etc/dnsdist` without backing it up first.
 
 * `make web` → `pnpm -C web install && pnpm -C web build` (outputs `web/dist`).
 * `make agent` → `GOOS=linux GOARCH={amd64,arm64} CGO_ENABLED=0 go build -trimpath
-  -ldflags "-s -w -X …version=…" -o internal/panel/install/bin/dnsjos-agent-linux-<arch>` (+ .sha256).
+  -ldflags "-s -w -X …version=…" -o internal/panel/install/bin/dnsjos-agent-linux-<arch>` (+ .sha256),
+  and writes the same version to `internal/panel/install/bin/dnsjos-agent.version`; the panel
+  reads it (`install.AgentVersion()`) as the embedded agent version for `agent_outdated`,
+  agent upgrades and `GET /meta` (empty = no agent embedded).
 * `make panel` → builds `bin/dnsjos` (embeds web/dist and agent binaries). A build without
   the embedded assets must still compile (placeholder files are committed).
 * `make release` = `make web agent panel` (a panel binary with the SPA and both agents embedded).
@@ -639,8 +656,8 @@ one is healthy again.
   `dnsdist --check-config` passes with the current rendered config, a local test query
   resolves, and a blocklisted name returns the blockpage. On any failure it downgrades to
   the previous version (`--allow-downgrades dnsdist=<previous>`, .deb kept in the apt
-  cache) and reports `upgrade_error`. Result is reported in the next heartbeat
-  (`last_upgrade: {from, to, ok, error, at}`).
+  cache). The result is reported in the next heartbeat
+  (`last_upgrade: {kind, from, to, ok, error, at}`; `upgrade_in_progress` while running).
 * **Series switch** (e.g. 2.0 → 2.1) is a separate, explicit admin action
   `{"type": "set_dnsdist_series", "series": "21"}` that rewrites the PowerDNS apt source
   + pin, followed by a normal upgrade. The renderer only supports series listed in
@@ -655,6 +672,64 @@ one is healthy again.
   verify sha256, atomically replace `/usr/local/bin/dnsjos-agent`, exit so systemd restarts
   it; the panel shows agent version vs the panel's embedded agent version and offers a
   rolling agent upgrade the same way (agent restarts do not touch dnsdist).
+* **Contract** (`internal/shared/api/upgrades.go`, migration `0003_upgrades`):
+  `node_commands.params jsonb` carries `version`/`series`; `nodes` gains
+  `dnsdist_candidate`, `dnsdist_available jsonb ('[]')`, `dnsdist_repo_series`,
+  `inventory_at`, `last_upgrade jsonb` (`api.UpgradeResult`). `upgrade_runs(id, kind
+  'dnsdist'|'agent', target_version, status 'running'|'paused'|'done'|'failed'|'aborted',
+  created_by, created_at, finished_at, message)` with a unique partial index allowing at
+  most one `running`/`paused` run; `upgrade_run_steps(run_id, position, node_id, status
+  'pending'|'running'|'ok'|'failed'|'skipped', started_at, finished_at, message,
+  from_version, to_version, pk(run_id, position))`. A failed step pauses the run (run
+  `paused`, step `failed`); resume retries that step; abort marks remaining steps
+  `skipped`; the run is `done` when every step is `ok`; `failed` is reserved for
+  orchestrator errors that cannot be resumed. Agent runs target the panel's
+  embedded agent version; their health gate is: reports that version and is `online`.
+  Orchestrator (`internal/panel/upgrades`, job every 5 s): steps run in position order
+  (default: least queries in the last hour first; `node_ids` order when given); a pending
+  step whose node already runs the target (or was deleted) is `skipped`; before sending
+  the command every live node must be `online`, else the run pauses. dnsdist health gate:
+  reports the target version, `online` (dnsdist running, no apply/blocklist error, all
+  backends up), heartbeat within 3 × interval, `last_upgrade` of this attempt (`at` ≥ step
+  start) with `ok`, and — when the 5 minutes before the step averaged > 1 qps — qps over
+  the whole minutes since the step started (≤ 2 min window, ≥ 30 s) back to ≥ 50 % of that
+  average. A `last_upgrade` of this attempt with `ok: false` fails the step at once;
+  otherwise the gate times out after 10 min.
+  Routes: §10 (`/nodes/{id}/versions`, `/upgrades…`, `/meta`).
 * Every upgrade action is audited; UI: node detail "Versions" card (installed, candidate,
   available list, Upgrade button, last result) and a Fleet → Upgrades page (start rolling
   run, live progress per node, pause/resume/abort, history).
+
+---
+
+## 19. Traffic analytics — top queried domains
+
+Complements §7/§9 (which only see *blocked* queries) with fleet-wide query analytics.
+No client addresses are collected or stored (top clients is a possible later option).
+
+* **Stream**: when `analytics.enabled` (new ConfigSpec section, default true), the renderer
+  adds a second dnstap logger to `127.0.0.1:6001` (separate from the blocked stream on
+  :6000) with `DnstapLogResponseAction` on every response AND
+  `addCacheHitResponseAction` (cache hits count too), guarded by
+  `ProbaRule(1 / analytics.sample_rate)` when `sample_rate > 1` (default 1 = every query).
+  Counts are multiplied back by `sample_rate` in the agent.
+* **Agent aggregation** (bounded memory): per local day, Space-Saving top-K sketches
+  (K = `analytics.top_k`, default 5000) for:
+  `queried` (raw qname), `queried_grouped` (registered domain via
+  golang.org/x/net/publicsuffix EffectiveTLDPlusOne; names without one keep the raw name),
+  `nxdomain` (raw qname of NXDOMAIN answers), `servfail` (raw qname of SERVFAIL answers);
+  plus exact counters by qtype and rcode, and total responses. Every 60 s the agent POSTs
+  a delta snapshot to `POST /agent/v1/analytics` (`api.AnalyticsBatch{day, total,
+  by_qtype{}, by_rcode{}, tops: {kind: [{name, count, error}]}}`, error = Space-Saving
+  over-estimate bound) and resets its window; unsent batches spool to disk like §9.4.
+* **Panel storage**: `analytics_daily_totals(day, node_id, total, by_qtype jsonb,
+  by_rcode jsonb)` (upsert-add) and `analytics_top_daily(day, node_id, kind, name,
+  count, pk(day,node_id,kind,name))` (upsert-add). A daily job trims each (day, node, kind)
+  to the top 1000 once the day is over. Retention `analytics_retention_days` (default 400).
+* **API**: `GET /api/v1/analytics?from&to&node_id&kind&limit` → `{total, by_qtype,
+  by_rcode, by_day[{day,total}], top[{rank,name,count,share}]}`; `.csv` export
+  (kind + range in the filename). Viewer.
+* **UI**: new page **Analytics** (`/analytics`): date presets, node filter, kind tabs
+  (Top domains [Raw | Grouped toggle], NXDOMAIN, SERVFAIL), top table with share bars,
+  qtype/rcode breakdown charts, daily volume chart, CSV export. Node detail gets a
+  compact "Top domains today" card. Counts from sampled nodes are marked approximate.

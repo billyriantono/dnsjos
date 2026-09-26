@@ -6,6 +6,7 @@ coverage.out
 
 # embedded build artifacts (placeholders are committed, real builds are not)
 /internal/panel/install/bin/dnsjos-agent-*
+/internal/panel/install/bin/dnsjos-agent.version
 !/internal/panel/install/bin/.gitkeep
 
 # web

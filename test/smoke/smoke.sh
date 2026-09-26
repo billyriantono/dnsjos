@@ -249,10 +249,54 @@ req 400 admin PATCH "/api/v1/nodes/$NODE" 'garbage'
 req 200 admin PATCH "/api/v1/nodes/$NODE" '{"name":"ns1-jkt","profile_id":""}'
 req 404 admin PATCH "/api/v1/nodes/$Z" '{"name":"x"}'
 req 202 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"cgk_refresh"}'
-req 400 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"rm"}'
+req 422 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"rm"}'
+req 422 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"upgrade_dnsdist"}'
+req 422 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"reapply","version":"2.0.1-1"}'
+req 422 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"set_dnsdist_series","series":"19"}'
+req 202 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"set_dnsdist_series","series":"21"}'
+req 202 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"check_updates"}'
+INV=',"dnsdist_version":"2.0.0-1","dnsdist_available":["2.0.0-1","2.0.1-1"],"dnsdist_candidate":"2.0.1-1","dnsdist_repo_series":"20","inventory_at":"2026-09-27T00:00:00Z"}'
+req 200 "$NTOK" POST /agent/v1/heartbeat "${HB%\}}$INV"
+[ "$(jq -r '[.commands[] | .series // empty] | join(",")' "$TMP/body")" = 21 ] || { FAILS=$((FAILS + 1)); echo "FAIL command params: $(cat "$TMP/body")"; }
+req 200 "$ATOK" POST /agent/v1/heartbeat "${HB%\}}$INV"
+req 200 viewer GET "/api/v1/nodes/$NODE/versions"
+[ "$(j '.available | length')" = 2 ] || { FAILS=$((FAILS + 1)); echo "FAIL versions: $(cat "$TMP/body")"; }
+req 404 viewer GET "/api/v1/nodes/$Z/versions"
+req 404 viewer GET /api/v1/nodes/not-a-uuid/versions
+req 202 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"upgrade_dnsdist","version":"2.0.1-1"}'
+req 422 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"upgrade_dnsdist","version":"9.9"}'
 req 404 admin POST "/api/v1/nodes/$Z/commands" '{"type":"reapply"}'
 req 404 admin POST /api/v1/nodes/not-a-uuid/commands '{"type":"reapply"}'
 req 403 viewer POST "/api/v1/nodes/$NODE/commands" '{"type":"reapply"}'
+
+# ── upgrades (SPEC §18) ──
+req 200 viewer GET /api/v1/meta
+[ "$(j '.supported_series | length')" -gt 0 ] || { FAILS=$((FAILS + 1)); echo "FAIL meta: $(cat "$TMP/body")"; }
+req 200 viewer GET /api/v1/upgrades
+req 404 viewer GET /api/v1/upgrades/999
+req 404 viewer GET /api/v1/upgrades/x
+req 403 viewer POST /api/v1/upgrades '{"kind":"dnsdist","target_version":"2.0.1-1"}'
+req 400 admin POST /api/v1/upgrades 'garbage'
+req 422 admin POST /api/v1/upgrades '{"kind":"os"}'
+req 422 admin POST /api/v1/upgrades '{"kind":"dnsdist","target_version":"9.9"}'
+req 422 admin POST /api/v1/upgrades "{\"kind\":\"dnsdist\",\"target_version\":\"2.0.1-1\",\"node_ids\":[\"$Z\"]}"
+[ -n "${EXPECT_AGENT:-}" ] || req 422 admin POST /api/v1/upgrades '{"kind":"agent"}' # nothing embedded
+req 200 "$NTOK" POST /agent/v1/heartbeat "${HB%\}}$INV" # both nodes fresh and online
+req 200 "$ATOK" POST /agent/v1/heartbeat "${HB%\}}$INV"
+req 201 admin POST /api/v1/upgrades '{"kind":"dnsdist","target_version":"2.0.1-1"}'
+RUN=$(j .id)
+[ "$(j '.steps | length')" = 2 ] || { FAILS=$((FAILS + 1)); echo "FAIL run steps: $(cat "$TMP/body")"; }
+req 409 admin POST /api/v1/upgrades '{"kind":"dnsdist","target_version":"2.0.1-1"}'
+req 409 admin POST "/api/v1/nodes/$NODE/commands" '{"type":"upgrade_dnsdist","version":"2.0.1-1"}'
+req 200 viewer GET "/api/v1/upgrades/$RUN"
+req 403 viewer POST "/api/v1/upgrades/$RUN/pause"
+req 200 admin POST "/api/v1/upgrades/$RUN/pause"
+req 409 admin POST "/api/v1/upgrades/$RUN/pause"
+req 200 admin POST "/api/v1/upgrades/$RUN/resume"
+req 404 admin POST "/api/v1/upgrades/$RUN/explode"
+req 200 admin POST "/api/v1/upgrades/$RUN/abort"
+req 409 admin POST "/api/v1/upgrades/$RUN/abort"
+req 404 admin POST /api/v1/upgrades/999/abort
 
 # ── blocklist ──
 req 200 viewer GET /api/v1/blocklist/sources

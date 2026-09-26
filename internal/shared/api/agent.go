@@ -70,6 +70,24 @@ type Heartbeat struct {
 	DynBlocks            []DynBlock    `json:"dynblocks"`
 	CGK                  CGKStatus     `json:"cgk"`
 	AckedCommands        []int64       `json:"acked_commands,omitempty"`
+	// Upgrade inventory (SPEC §18): refreshed every 6 h and on check_updates, repeated in
+	// every heartbeat; InventoryAt is nil until the first refresh.
+	DnsdistCandidate  string         `json:"dnsdist_candidate"`
+	DnsdistAvailable  []string       `json:"dnsdist_available"`
+	DnsdistRepoSeries string         `json:"dnsdist_repo_series"`
+	InventoryAt       *time.Time     `json:"inventory_at"`
+	LastUpgrade       *UpgradeResult `json:"last_upgrade"`
+	UpgradeInProgress bool           `json:"upgrade_in_progress"`
+}
+
+// UpgradeResult is the outcome of the node's most recent upgrade_dnsdist / upgrade_agent.
+type UpgradeResult struct {
+	Kind  string    `json:"kind"` // UpgradeDnsdist | UpgradeAgent
+	From  string    `json:"from"`
+	To    string    `json:"to"`
+	OK    bool      `json:"ok"`
+	Error string    `json:"error"`
+	At    time.Time `json:"at"`
 }
 
 type SystemStats struct {
@@ -132,12 +150,23 @@ const (
 	CmdCGKRefresh     = "cgk_refresh"
 	CmdRestartDnsdist = "restart_dnsdist"
 	CmdReapply        = "reapply"
+	// SPEC §18.
+	CmdCheckUpdates     = "check_updates"
+	CmdUpgradeDnsdist   = "upgrade_dnsdist"    // Version required
+	CmdSetDnsdistSeries = "set_dnsdist_series" // Series required
+	CmdUpgradeAgent     = "upgrade_agent"
 )
 
+var CommandTypes = []string{CmdCGKRefresh, CmdRestartDnsdist, CmdReapply,
+	CmdCheckUpdates, CmdUpgradeDnsdist, CmdSetDnsdistSeries, CmdUpgradeAgent}
+
 // Command is queued by the UI and delivered once; the agent echoes ID in AckedCommands.
+// Version/Series are the params of upgrade_dnsdist / set_dnsdist_series (node_commands.params).
 type Command struct {
-	ID   int64  `json:"id"`
-	Type string `json:"type"`
+	ID      int64  `json:"id"`
+	Type    string `json:"type"`
+	Version string `json:"version,omitempty"`
+	Series  string `json:"series,omitempty"`
 }
 
 type BlockedBatch struct {

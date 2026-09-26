@@ -11,7 +11,7 @@ import type {
   BlocklistSourcePatch,
   CGKReport,
   Command,
-  CommandType,
+  CommandRequest,
   ConfigSpec,
   ConfigVersion,
   ConfigVersionDiff,
@@ -20,11 +20,13 @@ import type {
   EnrollmentTokenCreate,
   EnrollmentTokenCreated,
   List,
+  Meta,
   MetricSeries,
   MetricsQuery,
   Node,
   NodeLive,
   NodePatch,
+  NodeVersions,
   Offender,
   OffendersQuery,
   Overview,
@@ -34,6 +36,9 @@ import type {
   RenderedConfig,
   Session,
   Settings,
+  UpgradeAction,
+  UpgradeRun,
+  UpgradeRunCreate,
   User,
   UserCreate,
   UserPatch,
@@ -124,7 +129,8 @@ export const api = {
     remove: (id: string) => del(`${V1}/nodes/${id}`),
     live: (id: string) => get<NodeLive>(`${V1}/nodes/${id}/live`),
     metrics: (id: string, q: MetricsQuery = {}) => get<MetricSeries>(`${V1}/nodes/${id}/metrics${qs({ ...q })}`),
-    command: (id: string, type: CommandType) => post<Command>(`${V1}/nodes/${id}/commands`, { type }),
+    command: (id: string, c: CommandRequest) => post<Command>(`${V1}/nodes/${id}/commands`, c),
+    versions: (id: string) => get<NodeVersions>(`${V1}/nodes/${id}/versions`),
     rendered: (id: string) => get<RenderedConfig>(`${V1}/nodes/${id}/config/rendered`),
     cgk: (id: string) => get<CGKReport | null>(`${V1}/nodes/${id}/cgk`),
   },
@@ -172,6 +178,13 @@ export const api = {
     get: () => get<Settings>(`${V1}/settings`),
     update: (s: Partial<Settings>) => put<Settings>(`${V1}/settings`, s),
   },
+  upgrades: {
+    list: () => get<List<UpgradeRun>>(`${V1}/upgrades`),
+    get: (id: number) => get<UpgradeRun>(`${V1}/upgrades/${id}`),
+    create: (c: UpgradeRunCreate) => post<UpgradeRun>(`${V1}/upgrades`, c),
+    action: (id: number, action: UpgradeAction) => post<UpgradeRun>(`${V1}/upgrades/${id}/${action}`),
+  },
+  meta: () => get<Meta>(`${V1}/meta`),
   overview: {
     get: () => get<Overview>(`${V1}/overview`),
     metrics: (q: MetricsQuery = {}) => get<MetricSeries>(`${V1}/overview/metrics${qs({ ...q })}`),
@@ -190,6 +203,10 @@ export const qk = {
   nodeMetrics: (id: string, q: MetricsQuery) => ['nodes', id, 'metrics', q] as const,
   nodeRendered: (id: string) => ['nodes', id, 'rendered'] as const,
   nodeCGK: (id: string) => ['nodes', id, 'cgk'] as const,
+  nodeVersions: (id: string) => ['nodes', id, 'versions'] as const,
+  upgrades: ['upgrades'] as const,
+  upgrade: (id: number) => ['upgrades', id] as const,
+  meta: ['meta'] as const,
   enrollment: ['enrollment-tokens'] as const,
   profiles: ['profiles'] as const,
   profile: (id: string) => ['profiles', id] as const,
@@ -237,6 +254,17 @@ export const useNodeRendered = (id: string) =>
   useQuery({ queryKey: qk.nodeRendered(id), queryFn: () => api.nodes.rendered(id) })
 export const useNodeCGK = (id: string) =>
   useQuery({ queryKey: qk.nodeCGK(id), queryFn: () => api.nodes.cgk(id), refetchInterval: 60_000 })
+export const useNodeVersions = (id: string) =>
+  useQuery({ queryKey: qk.nodeVersions(id), queryFn: () => api.nodes.versions(id), refetchInterval: LIVE })
+export const useUpgrades = () => useQuery({ queryKey: qk.upgrades, queryFn: api.upgrades.list, refetchInterval: LIVE })
+/** Polls every 3 s while the run is running. */
+export const useUpgrade = (id: number) =>
+  useQuery({
+    queryKey: qk.upgrade(id),
+    queryFn: () => api.upgrades.get(id),
+    refetchInterval: (q) => (q.state.data?.status === 'running' ? 3_000 : false),
+  })
+export const useMeta = () => useQuery({ queryKey: qk.meta, queryFn: api.meta, staleTime: Infinity })
 export const useEnrollmentTokens = () => useQuery({ queryKey: qk.enrollment, queryFn: api.enrollment.list })
 export const useProfiles = () => useQuery({ queryKey: qk.profiles, queryFn: api.profiles.list })
 export const useProfile = (id: string) => useQuery({ queryKey: qk.profile(id), queryFn: () => api.profiles.get(id) })
@@ -305,7 +333,10 @@ export const useUpdateNode = () =>
   )
 export const useDeleteNode = () => useMut(api.nodes.remove, () => [qk.nodes, qk.overview])
 export const useNodeCommand = () =>
-  useMut((a: { id: string; type: CommandType }) => api.nodes.command(a.id, a.type), (a) => [qk.node(a.id)])
+  useMut(
+    ({ id, ...c }: { id: string } & CommandRequest) => api.nodes.command(id, c),
+    (a) => [qk.node(a.id)],
+  )
 /** Renders a spec without saving it (profile editor "Preview Lua"). */
 export const usePreview = () =>
   useMutation({ mutationFn: (a: { id: string; spec: ConfigSpec }) => api.profiles.preview(a.id, a.spec) })
@@ -339,5 +370,12 @@ export const useCreateUser = () => useMut(api.users.create, () => [qk.users])
 export const useUpdateUser = () =>
   useMut((a: { id: string; patch: UserPatch }) => api.users.update(a.id, a.patch), () => [qk.users, qk.me])
 export const useDeleteUser = () => useMut(api.users.remove, () => [qk.users])
+
+export const useCreateUpgrade = () => useMut(api.upgrades.create, () => [qk.upgrades, qk.nodes])
+export const useUpgradeAction = () =>
+  useMut(
+    (a: { id: number; action: UpgradeAction }) => api.upgrades.action(a.id, a.action),
+    () => [qk.upgrades, qk.nodes],
+  )
 
 export const useUpdateSettings = () => useMut(api.settings.update, () => [qk.settings])

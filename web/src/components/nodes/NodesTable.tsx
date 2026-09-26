@@ -6,6 +6,7 @@ import { EmptyState } from '@/components/EmptyState'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
+import { updateAvailable } from '@/components/upgrades/versions'
 import type { Node } from '@/lib/api/types'
 import { fmtMs, fmtPercent, fmtQps } from '@/lib/format'
 import { cn } from '@/lib/utils'
@@ -47,8 +48,22 @@ const columns: (Column<Node> & { full?: boolean })[] = [
     sortValue: (n) => n.dnsdist_version,
     cell: (n) => (
       <div className="text-xs leading-tight">
-        <div>dnsdist {n.dnsdist_version || '—'}</div>
-        <div className="text-muted-foreground">agent {n.agent_version || '—'}</div>
+        <div className="flex items-center gap-1.5">
+          dnsdist {n.dnsdist_version || '—'}
+          {updateAvailable(n) && (
+            <Badge variant="outline" className="h-4 border-primary/30 bg-primary/10 px-1.5 text-[10px] text-primary" title={`candidate ${n.dnsdist_candidate}`}>
+              update available
+            </Badge>
+          )}
+        </div>
+        <div className="flex items-center gap-1.5 text-muted-foreground">
+          agent {n.agent_version || '—'}
+          {n.agent_outdated && (
+            <Badge variant="outline" className="h-4 border-warning/30 bg-warning/10 px-1.5 text-[10px] text-warning">
+              agent outdated
+            </Badge>
+          )}
+        </div>
       </div>
     ),
   },

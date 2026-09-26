@@ -102,6 +102,13 @@ type Node struct {
 	QPS           float64 `json:"qps"`
 	CacheHitRatio float64 `json:"cache_hit_ratio"`
 	LatencyAvgMs  float64 `json:"latency_avg_ms"`
+	// Upgrade inventory from the latest heartbeat (SPEC §18).
+	DnsdistCandidate  string         `json:"dnsdist_candidate"`
+	DnsdistAvailable  []string       `json:"dnsdist_available"`
+	DnsdistRepoSeries string         `json:"dnsdist_repo_series"`
+	InventoryAt       *time.Time     `json:"inventory_at"`
+	LastUpgrade       *UpgradeResult `json:"last_upgrade"`
+	AgentOutdated     bool           `json:"agent_outdated"` // agent_version != panel's embedded agent version
 }
 
 type NodePatch struct {
@@ -118,8 +125,11 @@ type NodeLive struct {
 	Heartbeat  *Heartbeat `json:"heartbeat"`
 }
 
+// CommandRequest is POST /nodes/{id}/commands; see Validate for the param rules.
 type CommandRequest struct {
-	Type string `json:"type"`
+	Type    string `json:"type"`
+	Version string `json:"version,omitempty"`
+	Series  string `json:"series,omitempty"`
 }
 
 type MetricPoint struct {

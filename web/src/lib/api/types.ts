@@ -180,15 +180,43 @@ export interface Heartbeat {
   dynblocks: DynBlock[]
   cgk: CGKStatus
   acked_commands?: number[]
+  dnsdist_candidate: string
+  dnsdist_available: string[] | null
+  dnsdist_repo_series: string
+  inventory_at: string | null
+  last_upgrade: UpgradeResult | null
+  upgrade_in_progress: boolean
 }
 
-export type CommandType = 'cgk_refresh' | 'restart_dnsdist' | 'reapply'
+export type UpgradeKind = 'dnsdist' | 'agent'
+export interface UpgradeResult {
+  kind: UpgradeKind
+  from: string
+  to: string
+  ok: boolean
+  error: string
+  at: string
+}
+
+export type CommandType =
+  | 'cgk_refresh'
+  | 'restart_dnsdist'
+  | 'reapply'
+  | 'check_updates'
+  | 'upgrade_dnsdist'
+  | 'set_dnsdist_series'
+  | 'upgrade_agent'
+/** version: upgrade_dnsdist only (one of the node's dnsdist_available); series: set_dnsdist_series only (Meta.supported_series). */
 export interface CommandRequest {
   type: CommandType
+  version?: string
+  series?: string
 }
 export interface Command {
   id: number
   type: CommandType
+  version?: string
+  series?: string
 }
 
 export interface EnrollResponse {
@@ -288,6 +316,12 @@ export interface Node {
   qps: number
   cache_hit_ratio: number
   latency_avg_ms: number
+  dnsdist_candidate: string
+  dnsdist_available: string[]
+  dnsdist_repo_series: string
+  inventory_at: string | null
+  last_upgrade: UpgradeResult | null
+  agent_outdated: boolean
 }
 
 export interface NodePatch {
@@ -580,4 +614,62 @@ export interface Overview {
   blocked_24h: number
   current_build: BlocklistBuild | null
   active_offenders: number
+}
+
+// ─── §18 upgrades (upgrades.go) ────────────────────────────────────────────
+/** GET /nodes/{id}/versions */
+export interface NodeVersions {
+  installed: string
+  candidate: string
+  available: string[]
+  series: string
+  inventory_at: string | null
+  last_upgrade: UpgradeResult | null
+  upgrade_in_progress: boolean
+  agent_version: string
+  panel_agent_version: string
+  agent_outdated: boolean
+}
+
+export type UpgradeRunStatus = 'running' | 'paused' | 'done' | 'failed' | 'aborted'
+export type UpgradeStepStatus = 'pending' | 'running' | 'ok' | 'failed' | 'skipped'
+
+export interface UpgradeRunStep {
+  position: number
+  node_id: string
+  node_name: string
+  status: UpgradeStepStatus
+  started_at: string | null
+  finished_at: string | null
+  message: string
+  from_version: string
+  to_version: string
+}
+
+export interface UpgradeRun {
+  id: number
+  kind: UpgradeKind
+  target_version: string
+  status: UpgradeRunStatus
+  created_by: string | null
+  created_at: string
+  finished_at: string | null
+  message: string
+  steps: UpgradeRunStep[]
+}
+
+/** node_ids omitted = every live node, least busy first. target_version: required for dnsdist, "" for agent = embedded version. */
+export interface UpgradeRunCreate {
+  kind: UpgradeKind
+  target_version: string
+  node_ids?: string[]
+}
+
+export type UpgradeAction = 'pause' | 'resume' | 'abort'
+
+/** GET /meta */
+export interface Meta {
+  panel_version: string
+  agent_version: string
+  supported_series: string[]
 }
