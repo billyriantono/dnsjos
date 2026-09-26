@@ -139,7 +139,8 @@ func TestEndToEnd(t *testing.T) {
 	readJSON(t, filepath.Join(root, "etc/dnsjos/agent.json"), &ac)
 	conf := filepath.Join(root, "etc/dnsdist/dnsdist.conf")
 	superviseDnsdist(t, conf, filepath.Join(tmp, "dnsdist.log"))
-	background(t, filepath.Join(tmp, "agent.log"), nil, agentBin, "run", "--root", root, "--no-systemd", "--log-level", "debug")
+	background(t, filepath.Join(tmp, "agent.log"), nil, agentBin, "run", "--root", root, "--no-systemd", "--log-level", "debug",
+		"--flush-interval", "5s")
 
 	eventually(t, 60*time.Second, "normal name resolves", func() (bool, string) {
 		out := dig("example.com", "A", "+short")
@@ -191,7 +192,7 @@ func TestEndToEnd(t *testing.T) {
 	// ── dnstap → agent → POST /blocked (flushed every 60 s) → report ──
 	day := time.Now().UTC()
 	q := fmt.Sprintf("/api/v1/reports/blocked?from=%s&to=%s", day.AddDate(0, 0, -1).Format(time.DateOnly), day.AddDate(0, 0, 1).Format(time.DateOnly))
-	eventually(t, 100*time.Second, "blocked report lists blocked.example", func() (bool, string) {
+	eventually(t, 30*time.Second, "blocked report lists blocked.example", func() (bool, string) {
 		var rep api.BlockedReport
 		p.must(200, "GET", q, nil, &rep)
 		return slices.ContainsFunc(rep.TopDomains, func(d api.TopDomain) bool { return d.QName == "blocked.example" }), fmt.Sprintf("%+v", rep)
@@ -204,6 +205,27 @@ func TestEndToEnd(t *testing.T) {
 	eventually(t, 60*time.Second, "new blockpage served", func() (bool, string) {
 		out := dig("blocked.example", "A", "+short")
 		return out == "10.9.9.9", out
+	})
+
+	// ── analytics: every answer → second dnstap stream → agent sketches → report ──
+	const nx = "nonexistent-e2e.example.invalid"
+	for _, name := range []string{"www.example.com", "example.org", "www.example.com", nx} {
+		dig(name, "A")
+	}
+	aq := func(kind string) api.AnalyticsReport {
+		var rep api.AnalyticsReport
+		p.must(200, "GET", fmt.Sprintf("/api/v1/analytics?from=%s&to=%s&kind=%s&limit=1000",
+			day.AddDate(0, 0, -1).Format(time.DateOnly), day.AddDate(0, 0, 1).Format(time.DateOnly), kind), nil, &rep)
+		return rep
+	}
+	has := func(rep api.AnalyticsReport, name string) bool {
+		return slices.ContainsFunc(rep.Top, func(e api.AnalyticsTopEntry) bool { return e.Name == name })
+	}
+	eventually(t, 45*time.Second, "analytics report with the queried names", func() (bool, string) {
+		raw, grouped, nxd := aq(api.AnalyticsQueried), aq(api.AnalyticsQueriedGrouped), aq(api.AnalyticsNXDomain)
+		ok := raw.Total > 0 && has(raw, "www.example.com") && has(raw, "example.org") && has(raw, nx) &&
+			has(grouped, "example.com") && has(grouped, "example.invalid") && has(nxd, nx) && raw.ByRcode["NXDOMAIN"] > 0
+		return ok, fmt.Sprintf("raw %+v\ngrouped %+v\nnxdomain %+v", raw, grouped.Top, nxd.Top)
 	})
 }
 

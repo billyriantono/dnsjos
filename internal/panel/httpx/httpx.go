@@ -163,3 +163,11 @@ func BodyLimit(n int64, next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
+
+// CSVCell defuses spreadsheet formula injection: qnames come from arbitrary DNS clients.
+func CSVCell(s string) string {
+	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
+		return "'" + s
+	}
+	return s
+}

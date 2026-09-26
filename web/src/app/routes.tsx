@@ -31,6 +31,7 @@ const routes: RouteObject[] = [
           { path: 'profiles', ...page(() => import('@/pages/profiles/ProfilesPage')), handle: { title: 'Profiles' } },
           { path: 'profiles/:id', ...page(() => import('@/pages/profiles/ProfileEditorPage')), handle: { title: 'Profile' } },
           { path: 'blocklist', ...page(() => import('@/pages/blocklist/BlocklistPage')), handle: { title: 'Blocklist' } },
+          { path: 'analytics', ...page(() => import('@/pages/analytics/AnalyticsPage')), handle: { title: 'Analytics' } },
           { path: 'reports', ...page(() => import('@/pages/reports/ReportsPage')), handle: { title: 'Reports' } },
           { path: 'offenders', ...page(() => import('@/pages/offenders/OffendersPage')), handle: { title: 'Offenders' } },
           { path: 'users', ...page(() => import('@/pages/users/UsersPage')), handle: { title: 'Users' } },

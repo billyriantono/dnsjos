@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/billyriantono/dnsjos/internal/agent/analytics"
 	"github.com/billyriantono/dnsjos/internal/agent/apply"
 	"github.com/billyriantono/dnsjos/internal/agent/blocklist"
 	"github.com/billyriantono/dnsjos/internal/agent/cgk"
@@ -29,6 +31,8 @@ const (
 	blocklistEvery = 60 * time.Second
 	flushEvery     = 60 * time.Second
 	dnstapCap      = 200000
+	// analyticsSpoolBytes bounds the analytics spool (a window holds up to 4 × top_k names).
+	analyticsSpoolBytes = 256 << 20
 )
 
 type agent struct {
@@ -38,7 +42,9 @@ type agent struct {
 	app   *apply.Applier
 	bl    *blocklist.Syncer
 	agg   *dnstap.Agg
-	spool *dnstap.Spool
+	spool *dnstap.Spool[api.BlockedBatch]
+	an    *analytics.Agg
+	anSp  *dnstap.Spool[api.AnalyticsBatch]
 	host  string
 	os    string
 	opMu  sync.Mutex // serialises apply, restarts and dnsdist upgrades
@@ -61,12 +67,16 @@ type agent struct {
 	inv        inventory
 	lastUp     *api.UpgradeResult
 	upgrading  bool
+	marker     *agentMarker // agent upgrade awaiting its first successful heartbeat
 
-	pollNow, forceNow, blNow, cgkNow, hbNow, invNow chan struct{}
+	pollNow, forceNow, blNow, cgkNow, hbNow, invNow, anNow chan struct{}
 }
 
 // Run runs the agent until ctx is cancelled.
 func Run(ctx context.Context, o Options) error {
+	if err := upgradeGuard(o); err != nil {
+		return err
+	}
 	a, err := newAgent(ctx, o)
 	if err != nil {
 		return err
@@ -77,7 +87,7 @@ func Run(ctx context.Context, o Options) error {
 	o.Log.Info("agent starting", "version", o.Version, "panel", a.cl.BaseURL, "root", o.Root, "no_systemd", o.NoSystemd)
 
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.cgkLoop, a.inventoryLoop} {
+	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.inventoryLoop} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
@@ -110,14 +120,16 @@ func newAgent(ctx context.Context, o Options) (*agent, error) {
 		app: &apply.Applier{Dir: o.path(DnsdistDir), BackupDir: o.path(BackupDir), PreAdoptDir: o.path(DataDir),
 			NoSystemd: o.NoSystemd, Log: o.Log},
 		bl:  &blocklist.Syncer{Client: cl, Path: o.path(CDBPath)},
-		agg: &dnstap.Agg{Cap: dnstapCap},
-		os:  osName(), run: execRunner, inv: inventory{Available: []string{}},
+		agg: &dnstap.Agg{Cap: dnstapCap}, an: &analytics.Agg{},
+		os: osName(), run: execRunner, inv: inventory{Available: []string{}},
 		pollNow: make(chan struct{}, 1), forceNow: make(chan struct{}, 1), blNow: make(chan struct{}, 1),
-		cgkNow: make(chan struct{}, 1), hbNow: make(chan struct{}, 1), invNow: make(chan struct{}, 1),
+		cgkNow: make(chan struct{}, 1), hbNow: make(chan struct{}, 1), invNow: make(chan struct{}, 1), anNow: make(chan struct{}, 1),
 	}
 	a.dnsdistVer = dnsdistVersion(ctx, a.run)
 	a.host, _ = os.Hostname()
-	a.spool = &dnstap.Spool{Dir: o.path(SpoolDir), Post: cl.PostBlocked, Log: o.Log}
+	a.spool = &dnstap.Spool[api.BlockedBatch]{Name: "blocked", Dir: o.path(SpoolDir), Post: cl.PostBlocked, Log: o.Log}
+	a.anSp = &dnstap.Spool[api.AnalyticsBatch]{Name: "analytics", Dir: o.path(AnalyticsSpoolDir), MaxBytes: analyticsSpoolBytes,
+		Post: cl.PostAnalytics, Log: o.Log}
 	return a, nil
 }
 
@@ -213,6 +225,7 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 		poke(a.hbNow) // let the panel see the new version right away
 	}
 	poke(a.cgkNow) // CGK loop re-reads the spec (enable/disable, interval)
+	poke(a.anNow)  // analytics listener follows the spec
 }
 
 // errorCode is the panel's error code of a failed call ("" when none).
@@ -341,6 +354,7 @@ func (a *agent) heartbeat(ctx context.Context) {
 		}
 		return
 	}
+	a.confirmUpgrade()
 	a.mu.Lock()
 	a.acks = slices.DeleteFunc(a.acks, func(id int64) bool { return slices.Contains(hb.AckedCommands, id) })
 	if ack.BlocklistSHA256 != "" {
@@ -384,11 +398,14 @@ func (a *agent) command(ctx context.Context, c api.Command) {
 	case api.CmdUpgradeAgent:
 		go a.upgrade(func() *api.UpgradeResult { return a.upgradeAgent(ctx) })
 	case api.CmdSetDnsdistSeries:
-		go func() {
-			if err := a.setSeries(ctx, c.Series); err != nil {
-				a.o.Log.Error("set_dnsdist_series failed", "err", err)
+		go a.upgrade(func() *api.UpgradeResult {
+			from, err := a.setSeries(ctx, c.Series)
+			res := &api.UpgradeResult{Kind: api.UpgradeSeries, From: from, To: c.Series, OK: err == nil, At: time.Now().UTC()}
+			if err != nil {
+				res.Error = err.Error()
 			}
-		}()
+			return res
+		})
 	default:
 		a.o.Log.Warn("unknown command", "type", c.Type)
 	}
@@ -399,34 +416,85 @@ func (a *agent) command(ctx context.Context, c api.Command) {
 
 // ── dnstap ──────────────────────────────────────────────────────────────────
 
-func (a *agent) dnstapLoop(ctx context.Context) {
-	go func() {
-		for ctx.Err() == nil {
-			l, err := net.Listen("tcp", dnsconf.DefaultDnstapAddr)
-			if err == nil {
-				err = dnstap.Serve(ctx, l, a.agg, a.o.Log)
-			}
-			if err != nil {
-				a.o.Log.Error("dnstap listener failed, retrying in 30s", "err", err)
-				select {
-				case <-ctx.Done():
-				case <-time.After(30 * time.Second):
-				}
+func (a *agent) flushEvery() time.Duration { return cmp.Or(a.o.FlushInterval, flushEvery) }
+
+// listen serves a dnstap stream on addr until ctx is done, retrying every 30 s.
+func (a *agent) listen(ctx context.Context, addr string, obs dnstap.Observer) {
+	for ctx.Err() == nil {
+		l, err := net.Listen("tcp", addr)
+		if err == nil {
+			err = dnstap.Serve(ctx, l, obs, a.o.Log)
+		}
+		if err != nil {
+			a.o.Log.Error("dnstap listener failed, retrying in 30s", "addr", addr, "err", err)
+			select {
+			case <-ctx.Done():
+			case <-time.After(30 * time.Second):
 			}
 		}
-	}()
-	t := time.NewTicker(flushEvery)
+	}
+}
+
+func (a *agent) dnstapLoop(ctx context.Context) {
+	go a.listen(ctx, dnsconf.DefaultDnstapAddr, a.agg.Observe)
+	t := time.NewTicker(a.flushEvery())
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			// Final flush; whatever the panel does not take in time is spooled.
 			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-			a.spool.Flush(fctx, a.agg.Take())
+			a.spool.Flush(fctx, dnstap.BlockedBatches(a.agg.Take()))
 			cancel()
 			return
 		case <-t.C:
-			a.spool.Flush(ctx, a.agg.Take())
+			a.spool.Flush(ctx, dnstap.BlockedBatches(a.agg.Take()))
+		}
+	}
+}
+
+// analyticsLoop runs the analytics listener on spec.analytics.stream_addr while
+// analytics is enabled and posts the aggregated window every flush interval.
+func (a *agent) analyticsLoop(ctx context.Context) {
+	var addr string
+	stop := func() {}
+	defer func() { stop() }()
+	follow := func() {
+		an := api.Analytics{}
+		if c := a.config(); c != nil {
+			an = c.Spec.Analytics
+		}
+		if !an.Enabled {
+			an = api.Analytics{}
+		}
+		a.an.Configure(an.SampleRate, an.TopK)
+		if an.StreamAddr == addr {
+			return
+		}
+		stop()
+		addr, stop = an.StreamAddr, func() {}
+		if addr != "" {
+			lctx, cancel := context.WithCancel(ctx)
+			done := make(chan struct{})
+			go func() { defer close(done); a.listen(lctx, addr, a.an.Observe) }()
+			stop = func() { cancel(); <-done }
+			a.o.Log.Info("analytics stream listening", "addr", addr, "sample_rate", an.SampleRate, "top_k", an.TopK)
+		}
+	}
+	t := time.NewTicker(a.flushEvery())
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			fctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			a.anSp.Flush(fctx, a.an.Take())
+			cancel()
+			return
+		case <-a.anNow:
+			follow()
+		case <-t.C:
+			follow()
+			a.anSp.Flush(ctx, a.an.Take())
 		}
 	}
 }

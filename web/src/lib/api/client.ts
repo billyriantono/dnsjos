@@ -1,5 +1,8 @@
 import { QueryClient, useMutation, useQuery, useQueryClient, type QueryKey } from '@tanstack/react-query'
 import type {
+  AnalyticsKind,
+  AnalyticsQuery,
+  AnalyticsReport,
   AuditEntry,
   AuditQuery,
   BlockedReport,
@@ -168,6 +171,11 @@ export const api = {
     /** URL for an <a href download> — the browser sends the session cookie. */
     blockedCsvUrl: (q: BlockedReportQuery & { kind: CSVKind }) => `${V1}/reports/blocked.csv${qs({ ...q })}`,
   },
+  analytics: {
+    report: (q: AnalyticsQuery = {}) => get<AnalyticsReport>(`${V1}/analytics${qs({ ...q })}`),
+    /** URL for an <a href download>; the filename carries kind and range. */
+    csvUrl: (q: AnalyticsQuery & { kind: AnalyticsKind }) => `${V1}/analytics.csv${qs({ ...q })}`,
+  },
   offenders: {
     list: (q: OffendersQuery = {}) => get<List<Offender>>(`${V1}/offenders${qs({ ...q })}`),
   },
@@ -218,6 +226,7 @@ export const qk = {
   blocklistCurrent: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
   blocked: (q: BlockedReportQuery) => ['reports', 'blocked', q] as const,
+  analytics: (q: AnalyticsQuery) => ['analytics', q] as const,
   offenders: (q: OffendersQuery) => ['offenders', q] as const,
   users: ['users'] as const,
   audit: (q: AuditQuery) => ['audit', q] as const,
@@ -292,6 +301,8 @@ export const useBlocklistLookup = (name: string) =>
   useQuery({ queryKey: qk.blocklistLookup(name), queryFn: () => api.blocklist.lookup(name), enabled: name !== '' })
 export const useBlockedReport = (q: BlockedReportQuery) =>
   useQuery({ queryKey: qk.blocked(q), queryFn: () => api.reports.blocked(q) })
+export const useAnalytics = (q: AnalyticsQuery) =>
+  useQuery({ queryKey: qk.analytics(q), queryFn: () => api.analytics.report(q) })
 export const useOffenders = (q: OffendersQuery = {}) =>
   useQuery({ queryKey: qk.offenders(q), queryFn: () => api.offenders.list(q), refetchInterval: LIVE })
 export const useUsers = () => useQuery({ queryKey: qk.users, queryFn: api.users.list })

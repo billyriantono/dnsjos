@@ -188,11 +188,11 @@ func TestUpgradeDnsdistRefusesUnknown(t *testing.T) {
 
 func TestSetSeries(t *testing.T) {
 	a, _ := fakeNode(t, "")
-	if err := a.setSeries(context.Background(), "19"); err == nil {
+	if _, err := a.setSeries(context.Background(), "19"); err == nil {
 		t.Fatal("unsupported series accepted")
 	}
-	if err := a.setSeries(context.Background(), "21"); err != nil {
-		t.Fatal(err)
+	if from, err := a.setSeries(context.Background(), "21"); err != nil || from != "20" {
+		t.Fatal(from, err)
 	}
 	if got := read(t, a.o.path(AptSourcesDir+"/pdns-dnsdist.list")); got !=
 		"deb [signed-by=/etc/apt/keyrings/dnsdist-20-pub.asc] https://repo.powerdns.com/debian bookworm-dnsdist-21 main\n" {
@@ -210,6 +210,25 @@ func TestSetSeries(t *testing.T) {
 	bk, _ := filepath.Glob(a.o.path(AptBackupDir + "/*/*"))
 	if len(bk) != 2 {
 		t.Fatalf("backups %v", bk)
+	}
+
+	// the command reports its outcome as last_upgrade {kind: series}
+	for _, c := range []struct {
+		series string
+		ok     bool
+	}{{"20", true}, {"19", false}} {
+		a.lastUp = nil
+		a.command(context.Background(), api.Command{ID: 1, Type: api.CmdSetDnsdistSeries, Series: c.series})
+		var r *api.UpgradeResult
+		for deadline := time.Now().Add(5 * time.Second); r == nil && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			a.mu.Lock()
+			r = a.lastUp
+			a.mu.Unlock()
+		}
+		if r == nil || r.Kind != api.UpgradeSeries || r.To != c.series || r.OK != c.ok || (r.Error != "") == c.ok || r.At.IsZero() ||
+			(c.ok && r.From != "21") {
+			t.Fatalf("series %s: %+v", c.series, r)
+		}
 	}
 }
 
@@ -261,11 +280,64 @@ func TestUpgradeAgent(t *testing.T) {
 	}
 	b := &agent{o: a.o}
 	b.o.Version = "1.1.0"
+	if err := upgradeGuard(b.o); err != nil {
+		t.Fatal(err)
+	}
 	b.loadLastUpgrade()
+	if b.marker == nil || b.marker.Starts != 1 || b.lastUp == nil || b.lastUp.OK {
+		t.Fatalf("before the first heartbeat: marker %+v last %+v", b.marker, b.lastUp)
+	}
+	b.confirmUpgrade() // first successful heartbeat
 	if r := b.lastUp; r == nil || !r.OK || r.Kind != api.UpgradeAgent || r.From != "1.0.0" || r.To != "1.1.0" {
 		t.Fatalf("after restart: %+v", r)
 	}
 	if _, err := os.Stat(a.o.path(AgentMarkerPath)); !os.IsNotExist(err) {
 		t.Fatal("marker kept")
+	}
+}
+
+// TestUpgradeGuard: a new agent that keeps restarting without a successful heartbeat
+// is replaced by the previous binary, which reports the failed upgrade.
+func TestUpgradeGuard(t *testing.T) {
+	exe := filepath.Join(t.TempDir(), "dnsjos-agent")
+	executable = func() (string, error) { return exe, nil }
+	var execd string
+	orig := reexec
+	reexec = func(p string) error { execd = p; return nil }
+	defer func() { executable, reexec = os.Executable, orig }()
+	o := Options{Root: t.TempDir(), Version: "1.1.0", Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	marker := func(at time.Time) {
+		os.WriteFile(exe, []byte("new"), 0o755)
+		os.WriteFile(exe+".prev", []byte("old"), 0o755)
+		writePrivate(o.path(AgentMarkerPath), []byte(`{"kind":"agent","from":"1.0.0","at":"`+at.Format(time.RFC3339)+`"}`))
+	}
+
+	marker(time.Now().Add(-10 * time.Minute)) // outside the window: never rolls back
+	for range 6 {
+		upgradeGuard(o)
+	}
+	if execd != "" || read(t, exe) != "new" {
+		t.Fatal("rolled back outside the crash window")
+	}
+
+	marker(time.Now())
+	for i := range crashStarts {
+		if upgradeGuard(o); execd != "" {
+			t.Fatalf("rolled back after %d starts", i+1)
+		}
+	}
+	upgradeGuard(o)
+	if real, _ := filepath.EvalSymlinks(exe); execd != real || read(t, exe) != "old" {
+		t.Fatalf("exec %q, binary %q", execd, read(t, exe))
+	}
+	if _, err := os.Stat(o.path(AgentMarkerPath)); !os.IsNotExist(err) {
+		t.Fatal("marker kept")
+	}
+	a := &agent{o: o}
+	a.o.Version = "1.0.0"
+	a.loadLastUpgrade()
+	if r := a.lastUp; r == nil || r.OK || r.Kind != api.UpgradeAgent || r.From != "1.0.0" || r.To != "1.1.0" ||
+		!strings.Contains(r.Error, "restored 1.0.0") || a.marker != nil {
+		t.Fatalf("reported %+v", r)
 	}
 }

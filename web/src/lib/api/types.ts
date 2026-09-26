@@ -1,6 +1,6 @@
 // Exact mirror of internal/shared/api (docs/SPEC.md §6, §8, §10). Field names match the wire format.
 // Go → TS: time.Time → RFC 3339 string; *T → T | null; `omitempty` → optional; json.RawMessage → unknown JSON.
-// Agent-only DTOs (EnrollRequest, AgentConfig, BlockedBatch, NodeRuntime) are not mirrored; EnrollResponse is.
+// Agent-only DTOs (EnrollRequest, AgentConfig, BlockedBatch, AnalyticsBatch, NodeRuntime) are not mirrored; EnrollResponse is.
 
 // ─── §6 ConfigSpec (config.go) ─────────────────────────────────────────────
 export interface Do53 {
@@ -99,6 +99,13 @@ export interface Webserver {
   prometheus_acl: string[]
 }
 
+export interface Analytics {
+  enabled: boolean
+  sample_rate: number // log 1 in N responses (1..1000)
+  top_k: number // 100..50000
+  stream_addr: string
+}
+
 export interface ConfigSpec {
   listen: Listen
   acl: string[]
@@ -109,6 +116,7 @@ export interface ConfigSpec {
   cgk: CGK
   tuning: Tuning
   webserver: Webserver
+  analytics: Analytics
 }
 
 // ─── §8 Heartbeat & CGK (agent.go) ─────────────────────────────────────────
@@ -561,6 +569,42 @@ export interface BlockedReport {
   top_domains: TopDomain[]
 }
 
+// ─── §19 Analytics (analytics.go) ──────────────────────────────────────────
+export type AnalyticsKind = 'queried' | 'queried_grouped' | 'nxdomain' | 'servfail'
+
+/** from/to are dates YYYY-MM-DD (default: last 7 days); kind defaults to queried; limit 1..1000 (default 100). */
+export interface AnalyticsQuery {
+  from?: string
+  to?: string
+  node_id?: string
+  kind?: AnalyticsKind
+  limit?: number
+}
+
+export interface AnalyticsDay {
+  day: string // YYYY-MM-DD
+  total: number
+}
+
+/** share is 0..1 of total (queried kinds) or of by_rcode NXDOMAIN/SERVFAIL; approximate = sampled or Space-Saving error. */
+export interface AnalyticsTopEntry {
+  rank: number
+  name: string
+  count: number
+  share: number
+  approximate: boolean
+}
+
+export interface AnalyticsReport {
+  from: string
+  to: string
+  total: number
+  by_qtype: Record<string, number>
+  by_rcode: Record<string, number>
+  by_day: AnalyticsDay[]
+  top: AnalyticsTopEntry[]
+}
+
 export interface Offender {
   id: number
   node_id: string
@@ -601,6 +645,7 @@ export interface Settings {
   blocklist_build_interval_minutes: number
   metrics_retention_days: number
   blocked_retention_days: number
+  analytics_retention_days: number
   agent_poll_interval_s: number
   agent_heartbeat_interval_s: number
   public_url: string

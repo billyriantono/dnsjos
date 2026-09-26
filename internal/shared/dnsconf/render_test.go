@@ -38,6 +38,11 @@ func TestGolden(t *testing.T) {
 			}
 			s.Blocking.BlockResponseIPs, s.Blocking.LogBlocked = false, false
 			s.Cache.Enabled = false
+			s.Analytics.Enabled = false
+		},
+		"analytics_sampled": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled = false, false, false
+			s.Analytics.SampleRate, s.Analytics.StreamAddr = 10, "[::1]:6101"
 		},
 		"extra_lua": func(s *api.ConfigSpec) {
 			s.Tuning.ExtraLua = "-- custom\nsetVerbose(true)\n"
@@ -86,12 +91,12 @@ func TestGolden(t *testing.T) {
 
 func TestModulesFollowSpec(t *testing.T) {
 	spec := api.DefaultConfigSpec()
-	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled = false, false, false
+	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled, spec.Analytics.Enabled = false, false, false, false
 	files, err := Render(spec, api.NodeRuntime{ConsoleKey: "k", WebPassword: "p", WebAPIKey: "a", BaseDir: "/tmp/stage/"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(files) != 1 || strings.Contains(string(files[FileConf]), "dofile") {
+	if len(files) != 1 || strings.Contains(string(files[FileConf]), "dofile") || strings.Contains(string(files[FileConf]), "Dnstap") {
 		t.Fatalf("disabled modules rendered: %v", files)
 	}
 	spec = api.DefaultConfigSpec()
@@ -107,6 +112,10 @@ func TestModulesFollowSpec(t *testing.T) {
 	}
 	if _, err := Render(spec, api.NodeRuntime{}); err == nil {
 		t.Error("missing secrets accepted")
+	}
+	spec.Analytics.StreamAddr = "127.0.0.1:6000"
+	if _, err := Render(spec, testRT); err == nil || !strings.Contains(err.Error(), "blocked-query dnstap") {
+		t.Errorf("analytics on the blocked stream: %v", err)
 	}
 	spec.Upstreams.Servers = nil
 	if _, err := Render(spec, testRT); err == nil {
@@ -205,8 +214,9 @@ func TestCheckConfig(t *testing.T) {
 	for name, mut := range map[string]func(*api.ConfigSpec){
 		"defaults": func(*api.ConfigSpec) {},
 		"all_off": func(s *api.ConfigSpec) {
-			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Cache.Enabled = false, false, false, false
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Cache.Enabled, s.Analytics.Enabled = false, false, false, false, false
 		},
+		"analytics_sampled": func(s *api.ConfigSpec) { s.Analytics.SampleRate = 7 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

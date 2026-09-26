@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/billyriantono/dnsjos/internal/panel/analytics"
 	"github.com/billyriantono/dnsjos/internal/panel/app"
 	"github.com/billyriantono/dnsjos/internal/panel/audit"
 	"github.com/billyriantono/dnsjos/internal/panel/auth"
@@ -116,6 +117,7 @@ func Handler(d *app.Deps) http.Handler {
 	configs.Register(r, d)
 	blocklist.Register(r, d)
 	reports.Register(r, d)
+	analytics.Register(r, d)
 	upgrades.Register(r, d)
 	r.Public("/", spaHandler())
 

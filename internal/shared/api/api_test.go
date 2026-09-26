@@ -40,6 +40,9 @@ func TestValidateRejects(t *testing.T) {
 		"upstream name":    func(s *ConfigSpec) { s.Upstreams.Servers[0].Name = `a"b` },
 		"webserver listen": func(s *ConfigSpec) { s.Webserver.Listen = "localhost:8083" },
 		"exclude hostname": func(s *ConfigSpec) { s.CGK.Exclude = []string{"bad domain"} },
+		"sample_rate":      func(s *ConfigSpec) { s.Analytics.SampleRate = 1001 },
+		"top_k":            func(s *ConfigSpec) { s.Analytics.TopK = 99 },
+		"stream_addr":      func(s *ConfigSpec) { s.Analytics.StreamAddr = "localhost:6001" },
 	}
 	for name, mutate := range cases {
 		s := DefaultConfigSpec()
@@ -133,6 +136,50 @@ func TestUpgradeRunCreateValidate(t *testing.T) {
 	for _, c := range []UpgradeRunCreate{{Kind: "os"}, {Kind: UpgradeDnsdist}, {Kind: UpgradeAgent, NodeIDs: []string{"a", "a"}}} {
 		if c.Validate() == nil {
 			t.Errorf("%+v: expected error", c)
+		}
+	}
+}
+
+func TestSpecMissingAnalyticsGetsDefaults(t *testing.T) {
+	raw, _ := json.Marshal(DefaultConfigSpec())
+	var m map[string]any
+	json.Unmarshal(raw, &m)
+	delete(m, "analytics")
+	raw, _ = json.Marshal(m)
+	var s ConfigSpec
+	if err := json.Unmarshal(raw, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Analytics != DefaultAnalytics() || s.Validate() != nil {
+		t.Errorf("analytics = %+v, validate = %v", s.Analytics, s.Validate())
+	}
+	if err := json.Unmarshal([]byte(`{"analytics":{"enabled":false}}`), &s); err != nil || s.Analytics.Enabled || s.Analytics.TopK != 5000 {
+		t.Errorf("partial analytics: %+v %v", s.Analytics, err)
+	}
+}
+
+func TestAnalyticsBatchValidate(t *testing.T) {
+	ok := AnalyticsBatch{Day: "2026-01-02", Total: 10, SampleRate: 1,
+		ByQType: map[string]int64{"A": 10}, ByRcode: map[string]int64{"NOERROR": 10},
+		Tops: map[string][]AnalyticsTopItem{AnalyticsQueried: {{Name: "example.com", Count: 10, Error: 2}}}}
+	if err := ok.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*AnalyticsBatch){
+		"day":         func(b *AnalyticsBatch) { b.Day = "2026-1-2" },
+		"total":       func(b *AnalyticsBatch) { b.Total = -1 },
+		"sample_rate": func(b *AnalyticsBatch) { b.SampleRate = 0 },
+		"qtype":       func(b *AnalyticsBatch) { b.ByQType = map[string]int64{"A": -1} },
+		"kind":        func(b *AnalyticsBatch) { b.Tops = map[string][]AnalyticsTopItem{"clients": nil} },
+		"error>count": func(b *AnalyticsBatch) {
+			b.Tops = map[string][]AnalyticsTopItem{AnalyticsNXDomain: {{Name: "x.invalid", Count: 1, Error: 2}}}
+		},
+		"empty name": func(b *AnalyticsBatch) { b.Tops = map[string][]AnalyticsTopItem{AnalyticsServfail: {{Count: 1}}} },
+	} {
+		b := ok
+		mutate(&b)
+		if b.Validate() == nil {
+			t.Errorf("%s: expected validation error", name)
 		}
 	}
 }

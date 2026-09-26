@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/colinmarc/cdb"
@@ -329,15 +330,16 @@ func firstBlockedName(p string) string {
 
 // setSeries points the PowerDNS source and pin at another dnsdist series (backups in
 // AptBackupDir) and refreshes the inventory; the old files come back when apt fails.
-func (a *agent) setSeries(ctx context.Context, series string) error {
+// It returns the previous series.
+func (a *agent) setSeries(ctx context.Context, series string) (old string, err error) {
 	if !slices.Contains(dnsconf.SupportedSeries, series) {
-		return fmt.Errorf("series %q is not supported (%v)", series, dnsconf.SupportedSeries)
+		return "", fmt.Errorf("series %q is not supported (%v)", series, dnsconf.SupportedSeries)
 	}
 	a.aptMu.Lock()
 	list, old, err := a.pdnsList()
 	if err != nil {
 		a.aptMu.Unlock()
-		return err
+		return "", err
 	}
 	orig := map[string][]byte{} // path → content before (nil = did not exist)
 	remember := func(p string) {
@@ -378,7 +380,7 @@ func (a *agent) setSeries(ctx context.Context, series string) error {
 	if err == nil {
 		a.o.Log.Info("dnsdist series switched", "from", old, "to", series)
 		if err = a.refreshInventory(ctx); err == nil {
-			return nil
+			return old, nil
 		}
 	}
 	for p, b := range orig {
@@ -388,7 +390,7 @@ func (a *agent) setSeries(ctx context.Context, series string) error {
 			apply.WriteFile(p, b, 0o644)
 		}
 	}
-	return fmt.Errorf("switching to series %s (old apt files restored): %w", series, err)
+	return old, fmt.Errorf("switching to series %s (old apt files restored): %w", series, err)
 }
 
 // backupApt keeps the original apt files in AptBackupDir/<timestamp>/.
@@ -452,7 +454,7 @@ func (a *agent) upgradeAgent(ctx context.Context) *api.UpgradeResult {
 			d.Sync()
 			d.Close()
 		}
-		b, _ := json.Marshal(api.UpgradeResult{Kind: api.UpgradeAgent, From: a.o.Version})
+		b, _ := json.Marshal(agentMarker{UpgradeResult: api.UpgradeResult{Kind: api.UpgradeAgent, From: a.o.Version, At: time.Now().UTC()}})
 		return writePrivate(a.o.path(AgentMarkerPath), b)
 	}()
 	if err != nil {
@@ -483,17 +485,96 @@ func (a *agent) download(ctx context.Context, path string, w io.Writer) error {
 	return err
 }
 
-// loadLastUpgrade reads last_upgrade; after a self-upgrade restart it records the
-// agent upgrade that led here.
-func (a *agent) loadLastUpgrade() {
-	var res api.UpgradeResult
-	if b, err := os.ReadFile(a.o.path(AgentMarkerPath)); err == nil && json.Unmarshal(b, &res) == nil {
-		res.To, res.OK, res.At = a.o.Version, true, time.Now().UTC()
-		b, _ = json.Marshal(res)
-		writePrivate(a.o.path(LastUpgradePath), b)
-		os.Remove(a.o.path(AgentMarkerPath))
-		a.o.Log.Info("agent upgraded", "from", res.From, "to", res.To)
+// agentMarker is AgentMarkerPath: written just before the self-upgrade restart, counted
+// up by every start of the new binary and removed by its first successful heartbeat.
+type agentMarker struct {
+	api.UpgradeResult     // Kind, From; At = when the binary was replaced
+	Starts            int `json:"starts"`
+}
+
+// A new agent that starts more than crashStarts times within crashWindow of the
+// upgrade without a successful heartbeat is replaced by the previous binary.
+const (
+	crashStarts = 3
+	crashWindow = 5 * time.Minute
+)
+
+// reexec replaces the process image (tests stub it).
+var reexec = func(exe string) error { return syscall.Exec(exe, os.Args, os.Environ()) }
+
+// upgradeGuard runs first on every start: while an agent upgrade is unconfirmed it
+// counts starts and, once the new binary keeps crashing, restores exe.prev, records
+// the failed upgrade and execs the previous binary.
+func upgradeGuard(o Options) error {
+	p := o.path(AgentMarkerPath)
+	var m agentMarker
+	if b, err := os.ReadFile(p); err != nil || json.Unmarshal(b, &m) != nil {
+		return nil
 	}
+	if m.At.IsZero() { // marker of an agent without the guard
+		m.At = time.Now().UTC()
+	}
+	m.Starts++
+	save := func() {
+		b, _ := json.Marshal(m)
+		if err := writePrivate(p, b); err != nil {
+			o.Log.Warn("updating the agent upgrade marker failed", "err", err)
+		}
+	}
+	if m.Starts <= crashStarts || time.Since(m.At) > crashWindow {
+		save()
+		return nil
+	}
+	exe, err := executable()
+	if err == nil {
+		exe, err = filepath.EvalSymlinks(exe)
+	}
+	if err == nil {
+		err = os.Rename(exe+".prev", exe)
+	}
+	if err != nil {
+		o.Log.Error("agent keeps crashing after the upgrade but the previous binary cannot be restored", "err", err)
+		save()
+		return nil
+	}
+	res := api.UpgradeResult{Kind: api.UpgradeAgent, From: m.From, To: o.Version, At: time.Now().UTC(),
+		Error: fmt.Sprintf("agent %s restarted %d times within %s of the upgrade without reaching the panel; restored %s",
+			o.Version, m.Starts-1, crashWindow, m.From)}
+	b, _ := json.Marshal(res)
+	writePrivate(o.path(LastUpgradePath), b)
+	os.Remove(p)
+	o.Log.Error("agent upgrade failed, running the previous binary", "restored", m.From, "failed", o.Version)
+	return reexec(exe)
+}
+
+// confirmUpgrade records a pending agent upgrade as done (first successful heartbeat).
+func (a *agent) confirmUpgrade() {
+	a.mu.Lock()
+	m := a.marker
+	a.marker = nil
+	a.mu.Unlock()
+	if m == nil {
+		return
+	}
+	res := m.UpgradeResult
+	res.To, res.OK, res.At = a.o.Version, true, time.Now().UTC()
+	b, _ := json.Marshal(res)
+	writePrivate(a.o.path(LastUpgradePath), b)
+	os.Remove(a.o.path(AgentMarkerPath))
+	a.mu.Lock()
+	a.lastUp = &res
+	a.mu.Unlock()
+	a.o.Log.Info("agent upgraded", "from", res.From, "to", res.To)
+	poke(a.hbNow)
+}
+
+// loadLastUpgrade reads last_upgrade and a pending agent upgrade marker.
+func (a *agent) loadLastUpgrade() {
+	var m agentMarker
+	if b, err := os.ReadFile(a.o.path(AgentMarkerPath)); err == nil && json.Unmarshal(b, &m) == nil {
+		a.marker = &m
+	}
+	var res api.UpgradeResult
 	if b, err := os.ReadFile(a.o.path(LastUpgradePath)); err == nil && json.Unmarshal(b, &res) == nil {
 		a.lastUp = &res
 	}

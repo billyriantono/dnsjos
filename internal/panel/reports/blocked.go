@@ -166,7 +166,7 @@ func (s *svc) blockedCSV(w http.ResponseWriter, r *http.Request) {
 		}
 		rec := make([]string, len(vals))
 		for i, v := range vals {
-			rec[i] = cell(fmt.Sprint(v))
+			rec[i] = httpx.CSVCell(fmt.Sprint(v))
 		}
 		if cw.Write(rec) != nil {
 			break
@@ -176,12 +176,4 @@ func (s *svc) blockedCSV(w http.ResponseWriter, r *http.Request) {
 	if err := rows.Err(); err != nil {
 		slog.ErrorContext(r.Context(), "blocked csv aborted", "err", err)
 	}
-}
-
-// cell defuses spreadsheet formula injection: qnames come from arbitrary DNS clients.
-func cell(s string) string {
-	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
-		return "'" + s
-	}
-	return s
 }

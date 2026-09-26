@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -18,6 +19,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	dt "github.com/dnstap/golang-dnstap"
+	"github.com/miekg/dns"
 
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
@@ -31,7 +35,11 @@ func TestRunTestMode(t *testing.T) {
 
 	var mu sync.Mutex
 	var hbs []api.Heartbeat
+	var batches []api.AnalyticsBatch
 	cmdSent := false
+	fl, _ := net.Listen("tcp", "127.0.0.1:0")
+	streamAddr := fl.Addr().String()
+	fl.Close()
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /agent/v1/enroll", func(w http.ResponseWriter, r *http.Request) {
 		var req api.EnrollRequest
@@ -58,6 +66,7 @@ func TestRunTestMode(t *testing.T) {
 		}
 		spec := api.DefaultConfigSpec()
 		spec.CGK.Enabled = false // no network probes in tests
+		spec.Analytics.StreamAddr, spec.Analytics.SampleRate = streamAddr, 3
 		json.NewEncoder(w).Encode(api.AgentConfig{Version: 3, Spec: spec, Profile: "default", PollIntervalS: 1, HeartbeatIntervalS: 1,
 			Blocklist: api.BlocklistRef{SHA256: sha, Size: int64(len(cdb)), URL: "/agent/v1/blocklist"}})
 	}))
@@ -78,11 +87,23 @@ func TestRunTestMode(t *testing.T) {
 		}
 		json.NewEncoder(w).Encode(ack)
 	}))
+	mux.HandleFunc("POST /agent/v1/analytics", auth(func(w http.ResponseWriter, r *http.Request) {
+		var b api.AnalyticsBatch
+		json.NewDecoder(r.Body).Decode(&b)
+		if b.Validate() != nil {
+			w.WriteHeader(422)
+			return
+		}
+		mu.Lock()
+		batches = append(batches, b)
+		mu.Unlock()
+		w.WriteHeader(204)
+	}))
 	panel := httptest.NewServer(mux)
 	defer panel.Close()
 
 	root := t.TempDir()
-	o := Options{Root: root, NoSystemd: true, DnsdistWeb: "http://127.0.0.1:1", Version: "t",
+	o := Options{Root: root, NoSystemd: true, DnsdistWeb: "http://127.0.0.1:1", Version: "t", FlushInterval: 200 * time.Millisecond,
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	if err := Enroll(context.Background(), o, panel.URL, "enroll-tok", "node-a", false); err != nil {
 		t.Fatal(err)
@@ -110,6 +131,18 @@ func TestRunTestMode(t *testing.T) {
 		if acked && last.AppliedConfigVersion == 3 && last.BlocklistSHA256 == sha {
 			break
 		}
+	}
+	// analytics: a response on the configured stream reaches the panel ×sample_rate
+	sendResponse(t, streamAddr, "Www.Example.COM.")
+	var got []api.AnalyticsBatch
+	for deadline := time.Now().Add(10 * time.Second); len(got) == 0 && time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		mu.Lock()
+		got = slices.Clone(batches)
+		mu.Unlock()
+	}
+	if len(got) != 1 || got[0].Total != 3 || got[0].SampleRate != 3 || got[0].ByRcode["NXDOMAIN"] != 3 ||
+		len(got[0].Tops[api.AnalyticsNXDomain]) != 1 || got[0].Tops[api.AnalyticsQueriedGrouped][0].Name != "example.com" {
+		t.Fatalf("analytics batches: %+v", got)
 	}
 	cancel()
 	if err := <-done; err != nil {
@@ -199,4 +232,37 @@ func TestRunSeedsAdoptedCDB(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("seeded=%q applied=%d", seeded, applied)
+}
+
+// sendResponse writes one dnstap CLIENT_RESPONSE (NXDOMAIN for name) to addr, retrying
+// until the agent listens.
+func sendResponse(t *testing.T, addr, name string) {
+	m := new(dns.Msg)
+	m.SetQuestion(name, dns.TypeA)
+	m.Response, m.Rcode = true, dns.RcodeNameError
+	wire, _ := m.Pack()
+	typ, kind := dt.Message_CLIENT_RESPONSE, dt.Dnstap_MESSAGE
+	sec := uint64(time.Now().Unix())
+	f := &dt.Dnstap{Type: &kind, Message: &dt.Message{Type: &typ, ResponseMessage: wire, ResponseTimeSec: &sec}}
+	var c net.Conn
+	var err error
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+		if c, err = net.Dial("tcp", addr); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	w, err := dt.NewWriter(c, &dt.WriterOptions{Bidirectional: true, Timeout: 5 * time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dt.NewEncoder(w).Encode(f); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
 }

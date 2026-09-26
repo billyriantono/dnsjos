@@ -144,6 +144,7 @@ func main() {
 // seed posts a CGK report and a year of blocked-domain batches for a node.
 func seed(n *node, i int) {
 	cgk(n)
+	seedAnalytics(n, i)
 	today := time.Now().UTC()
 	var items []api.BlockedItem
 	for d := 0; d < 420; d += 1 + d/30 { // dense recently, sparse back into last year

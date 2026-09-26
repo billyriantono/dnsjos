@@ -29,15 +29,19 @@ const (
 	SecretsPath = DataDir + "/secrets.json"
 	BackupDir   = DataDir + "/backup"
 	SpoolDir    = DataDir + "/blocked-spool"
-	CDBPath     = DataDir + "/blocklist/current.cdb"
+	// AnalyticsSpoolDir holds unsent analytics batches (SPEC §19).
+	AnalyticsSpoolDir = DataDir + "/analytics-spool"
+	CDBPath           = DataDir + "/blocklist/current.cdb"
 )
 
 type Options struct {
 	Root       string // test mode: prefix for every filesystem path
 	NoSystemd  bool   // test mode: no systemctl; tolerate a missing dnsdist binary
 	DnsdistWeb string // override of the dnsdist webserver URL (default from the spec)
-	Version    string
-	Log        *slog.Logger
+	// FlushInterval of the blocked and analytics windows (default 60 s; tests shorten it).
+	FlushInterval time.Duration
+	Version       string
+	Log           *slog.Logger
 }
 
 func (o Options) path(p string) string { return filepath.Join(o.Root, p) }

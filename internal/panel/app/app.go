@@ -150,6 +150,7 @@ func (s *Settings) Get() api.Settings {
 		BlocklistBuildIntervalMinutes: s.Int("blocklist_build_interval_minutes", 180),
 		MetricsRetentionDays:          s.Int("metrics_retention_days", 35),
 		BlockedRetentionDays:          s.Int("blocked_retention_days", 800),
+		AnalyticsRetentionDays:        s.Int("analytics_retention_days", 400),
 		AgentPollIntervalS:            s.Int("agent_poll_interval_s", api.DefaultPollS),
 		AgentHeartbeatIntervalS:       s.Int("agent_heartbeat_interval_s", api.DefaultHeartbS),
 		PublicURL:                     s.String("public_url", ""),

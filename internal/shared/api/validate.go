@@ -171,6 +171,12 @@ func (s ConfigSpec) Validate() error {
 	addrs("webserver.listen", []string{s.Webserver.Listen}, true)
 	prefixes("webserver.prometheus_acl", s.Webserver.PrometheusACL)
 
+	if an := s.Analytics; an.Enabled {
+		between("analytics.sample_rate", an.SampleRate, 1, 1000)
+		between("analytics.top_k", an.TopK, 100, 50000)
+		addrs("analytics.stream_addr", []string{an.StreamAddr}, true)
+	}
+
 	return errors.Join(errs...)
 }
 

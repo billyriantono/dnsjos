@@ -180,6 +180,23 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		}
 		module(FileCGK, b)
 	}
+	if an := spec.Analytics; an.Enabled {
+		ap, err := addrPort(an.StreamAddr)
+		if err != nil {
+			return nil, fmt.Errorf("analytics.stream_addr: %w", err)
+		}
+		if blocked, _ := addrPort(rt.DnstapAddr); ap == blocked {
+			return nil, fmt.Errorf("analytics.stream_addr: %s is the blocked-query dnstap stream", ap)
+		}
+		rule := "AllRule()"
+		if an.SampleRate > 1 {
+			rule = fmt.Sprintf("ProbaRule(1 / %d)", an.SampleRate)
+		}
+		w("\n-- Analytics: every answer (forwarded, cache hit, self-answered) to the agent.\nlocal analytics = newFrameStreamTcpLogger(%s)\n", luaString(ap))
+		for _, chain := range []string{"addResponseAction", "addCacheHitResponseAction", "addSelfAnsweredResponseAction"} {
+			w("%s(%s, DnstapLogResponseAction(%s, analytics), {name = \"dnsjos-analytics\"})\n", chain, rule, luaString(rt.Hostname))
+		}
+	}
 	if x := strings.TrimRight(spec.Tuning.ExtraLua, "\n"); strings.TrimSpace(x) != "" {
 		w("\n-- BEGIN extra_lua (verbatim from the profile)\n%s\n-- END extra_lua\n", x)
 	}

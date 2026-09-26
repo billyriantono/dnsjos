@@ -347,6 +347,7 @@ type Settings struct {
 	BlocklistBuildIntervalMinutes int    `json:"blocklist_build_interval_minutes"`
 	MetricsRetentionDays          int    `json:"metrics_retention_days"`
 	BlockedRetentionDays          int    `json:"blocked_retention_days"`
+	AnalyticsRetentionDays        int    `json:"analytics_retention_days"`
 	AgentPollIntervalS            int    `json:"agent_poll_interval_s"`
 	AgentHeartbeatIntervalS       int    `json:"agent_heartbeat_interval_s"`
 	PublicURL                     string `json:"public_url"` // empty = DNSJOS_PUBLIC_URL

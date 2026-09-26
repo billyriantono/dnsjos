@@ -64,6 +64,8 @@ func validateSettings(s *api.Settings) string {
 		return "metrics_retention_days must be 1..3650"
 	case !in(s.BlockedRetentionDays, 1, 3650):
 		return "blocked_retention_days must be 1..3650"
+	case !in(s.AnalyticsRetentionDays, 1, 3650):
+		return "analytics_retention_days must be 1..3650"
 	case !in(s.AgentPollIntervalS, 5, 3600):
 		return "agent_poll_interval_s must be 5..3600"
 	case !in(s.AgentHeartbeatIntervalS, 5, 600):

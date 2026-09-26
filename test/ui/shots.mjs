@@ -38,7 +38,7 @@ const steps = [
   ['node-actions', firstNode, tab('Actions')],
   ['profiles', '/profiles'],
   ['profiles-new', '/profiles', btn(/new profile/i)],
-  ...['Listeners', 'ACL', 'Upstreams', 'Cache', 'Blocking', 'Abuse', 'CGK', 'Tuning'].map((t) => [
+  ...['Listeners', 'ACL', 'Upstreams', 'Cache', 'Blocking', 'Abuse', 'CGK', 'Analytics', 'Tuning'].map((t) => [
     'profile-' + t.toLowerCase(),
     defaultProfile,
     tab(t),
@@ -47,6 +47,10 @@ const steps = [
   ['profile-diff', defaultProfile, btn(/^Diff v/)],
   ['profile-load', defaultProfile, btn(/^Load v1$/)],
   ['blocklist', '/blocklist'],
+  ['analytics', '/analytics'],
+  ['analytics-grouped', '/analytics?range=30d&grouped=1'],
+  ['analytics-nxdomain', '/analytics', tab('NXDOMAIN')],
+  ['analytics-servfail', '/analytics?range=today&kind=servfail'],
   ['reports', '/reports'],
   ['offenders', '/offenders'],
   ['users', '/users'],

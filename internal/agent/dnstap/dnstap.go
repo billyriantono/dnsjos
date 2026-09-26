@@ -1,5 +1,5 @@
-// Package dnstap receives dnsdist's dnstap stream of blocked queries and aggregates
-// it into (day, qname, qtype) → count (SPEC §9.4).
+// Package dnstap receives dnsdist's dnstap streams: blocked queries are aggregated
+// into (day, qname, qtype) → count (SPEC §9.4); Serve also feeds the analytics stream.
 package dnstap
 
 import (
@@ -51,6 +51,12 @@ func (a *Agg) Add(t time.Time, qname, qtype string) {
 	a.m[k]++
 }
 
+// Observe counts the question of m (a Serve callback).
+func (a *Agg) Observe(t time.Time, m *dns.Msg) {
+	q := m.Question[0]
+	a.Add(t, strings.TrimSuffix(strings.ToLower(q.Name), "."), dns.TypeToString[q.Qtype])
+}
+
 // Take returns the window's items and starts a new window.
 func (a *Agg) Take() []api.BlockedItem {
 	a.mu.Lock()
@@ -64,9 +70,12 @@ func (a *Agg) Take() []api.BlockedItem {
 	return out
 }
 
-// Serve accepts framestream connections on l and feeds every CLIENT_QUERY (and
-// CLIENT_RESPONSE, used for response-IP blocks) into a until ctx is done.
-func Serve(ctx context.Context, l net.Listener, a *Agg, log *slog.Logger) error {
+// Observer receives every decoded message that has a question; it must not keep m.
+type Observer func(t time.Time, m *dns.Msg)
+
+// Serve accepts framestream connections on l and passes every CLIENT_QUERY and
+// CLIENT_RESPONSE to obs until ctx is done.
+func Serve(ctx context.Context, l net.Listener, obs Observer, log *slog.Logger) error {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	conns := map[net.Conn]struct{}{}
@@ -98,7 +107,7 @@ func Serve(ctx context.Context, l net.Listener, a *Agg, log *slog.Logger) error 
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := readConn(c, a); err != nil && ctx.Err() == nil {
+			if err := readConn(c, obs); err != nil && ctx.Err() == nil {
 				log.Warn("dnstap connection closed", "remote", c.RemoteAddr().String(), "err", err)
 			}
 			c.Close()
@@ -109,7 +118,7 @@ func Serve(ctx context.Context, l net.Listener, a *Agg, log *slog.Logger) error 
 	}
 }
 
-func readConn(c net.Conn, a *Agg) error {
+func readConn(c net.Conn, obs Observer) error {
 	r, err := dt.NewReader(c, &dt.ReaderOptions{Bidirectional: true, Timeout: 10 * time.Second})
 	if err != nil {
 		return err
@@ -135,8 +144,7 @@ func readConn(c net.Conn, a *Agg) error {
 		if !ok || msg.Unpack(wire) != nil || len(msg.Question) == 0 {
 			continue
 		}
-		q := msg.Question[0]
-		a.Add(t, strings.TrimSuffix(strings.ToLower(q.Name), "."), dns.TypeToString[q.Qtype])
+		obs(t, &msg)
 	}
 }
 

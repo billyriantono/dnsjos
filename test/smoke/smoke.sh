@@ -116,6 +116,9 @@ req 200 viewer GET /api/v1/settings
 req 403 viewer PUT /api/v1/settings '{"metrics_retention_days":10}'
 req 200 admin PUT /api/v1/settings '{"metrics_retention_days":30}'
 req 400 admin PUT /api/v1/settings '{"agent_poll_interval_s":1}'
+req 200 admin PUT /api/v1/settings '{"analytics_retention_days":400}'
+[ "$(j .analytics_retention_days)" = 400 ] || { FAILS=$((FAILS + 1)); echo "FAIL analytics retention setting: $(j .analytics_retention_days)"; }
+req 400 admin PUT /api/v1/settings '{"analytics_retention_days":0}'
 req 400 admin PUT /api/v1/settings '{"public_url":"javascript:alert(1)"}'
 req 400 admin PUT /api/v1/settings 'nope'
 
@@ -213,6 +216,15 @@ req 204 "$NTOK" POST /agent/v1/blocked '{"items":[{"day":"nope","qname":"","qtyp
 req 400 "$NTOK" POST /agent/v1/blocked 'garbage'
 req 204 "$NTOK" POST /agent/v1/cgk '{"measured_at":"2026-09-27T00:00:00Z","ok":true,"aliases":["104.16.0.1"],"rewrite_ranges":["104.20.0.0/16"],"pools":[{"net":"104.20.0.0/16","colos":["CGK"]}]}'
 req 400 "$NTOK" POST /agent/v1/cgk 'garbage'
+TODAY=$(date -u +%F)
+AB="{\"day\":\"$TODAY\",\"total\":10,\"sample_rate\":1,\"by_qtype\":{\"A\":10},\"by_rcode\":{\"NOERROR\":8,\"NXDOMAIN\":2},
+ \"tops\":{\"queried\":[{\"name\":\"www.example.com\",\"count\":6,\"error\":0}],\"nxdomain\":[{\"name\":\"nope.example\",\"count\":2,\"error\":0}]}}"
+req 204 "$NTOK" POST /agent/v1/analytics "$AB"
+req 204 "$NTOK" POST /agent/v1/analytics "$AB"
+req 422 "$NTOK" POST /agent/v1/analytics "{\"day\":\"$TODAY\",\"sample_rate\":1,\"tops\":{\"clients\":[]}}"
+req 422 "$NTOK" POST /agent/v1/analytics '{"day":"nope","sample_rate":0}'
+req 400 "$NTOK" POST /agent/v1/analytics 'garbage'
+req 401 none POST /agent/v1/analytics "$AB"
 
 # ── nodes ──
 req 200 viewer GET /api/v1/nodes
@@ -341,6 +353,19 @@ req 400 viewer GET '/api/v1/reports/blocked?node_id=not-a-uuid'
 req '*' viewer GET '/api/v1/reports/blocked?limit=-5'
 for k in summary monthly top; do req 200 viewer GET "/api/v1/reports/blocked.csv?kind=$k"; done
 req 400 viewer GET '/api/v1/reports/blocked.csv?kind=nope'
+req 200 viewer GET /api/v1/analytics
+[ "$(j '.total, .top[0].name, .top[0].count, (.by_day | length)' | paste -sd, -)" = 20,www.example.com,12,7 ] ||
+	{ FAILS=$((FAILS + 1)); echo "FAIL analytics report: $(cat "$TMP/body")"; }
+req 200 viewer GET "/api/v1/analytics?from=$TODAY&to=$TODAY&node_id=$NODE&kind=nxdomain&limit=10"
+[ "$(j .top[0].share)" = 1 ] || { FAILS=$((FAILS + 1)); echo "FAIL analytics nxdomain share: $(cat "$TMP/body")"; }
+for q in from=yesterday kind=nope limit=0 limit=1001 node_id=not-a-uuid 'from=2026-02-01&to=2026-01-01'; do
+	req 400 viewer GET "/api/v1/analytics?$q"
+done
+req 200 viewer GET '/api/v1/analytics.csv?kind=queried_grouped'
+req 200 viewer GET /api/v1/analytics.csv
+[ "$(head -1 "$TMP/body" | tr -d '\r')" = rank,name,count,share,approximate ] || { FAILS=$((FAILS + 1)); echo "FAIL analytics csv: $(cat "$TMP/body")"; }
+req 400 viewer GET '/api/v1/analytics.csv?kind=nope'
+req 401 none GET /api/v1/analytics
 req 200 viewer GET /api/v1/offenders
 req 200 viewer GET "/api/v1/offenders?active=true&node_id=$NODE"
 req 400 viewer GET '/api/v1/offenders?node_id=not-a-uuid'

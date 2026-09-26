@@ -1,5 +1,6 @@
 import type { IconType } from 'react-icons'
 import {
+  LuChartNoAxesColumn,
   LuFileChartColumn,
   LuLayoutDashboard,
   LuPackageCheck,
@@ -43,6 +44,7 @@ interface NavItem {
 const monitor: NavItem[] = [
   { to: '/', label: 'Overview', icon: LuLayoutDashboard },
   { to: '/nodes', label: 'Nodes', icon: LuServer },
+  { to: '/analytics', label: 'Analytics', icon: LuChartNoAxesColumn },
   { to: '/reports', label: 'Reports', icon: LuFileChartColumn },
   { to: '/offenders', label: 'Offenders', icon: LuSiren },
 ]

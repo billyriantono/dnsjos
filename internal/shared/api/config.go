@@ -13,6 +13,7 @@ type ConfigSpec struct {
 	CGK       CGK       `json:"cgk"`
 	Tuning    Tuning    `json:"tuning"`
 	Webserver Webserver `json:"webserver"`
+	Analytics Analytics `json:"analytics"`
 }
 
 type Listen struct {
@@ -184,5 +185,6 @@ func DefaultConfigSpec() ConfigSpec {
 		},
 		Tuning:    Tuning{UDPBufferBytes: 16777216},
 		Webserver: Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},
+		Analytics: DefaultAnalytics(),
 	}
 }

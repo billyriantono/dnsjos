@@ -11,6 +11,7 @@ import type { BackendStat, NodeLive } from '@/lib/api/types'
 import { fmtCompact, fmtDuration, fmtMs, fmtNumber, fmtPercent, fmtQps } from '@/lib/format'
 
 import { MetricChart } from './MetricChart'
+import { NodeTopDomainsCard } from './NodeTopDomainsCard'
 import { toRows } from './metrics'
 
 type Backend = BackendStat & { share: number }
@@ -89,6 +90,8 @@ export function NodeOverviewTab({ id, live, liveLoading }: { id: string; live: N
         defaultSort={{ key: 'order' }}
         empty={<EmptyState icon={LuNetwork} title="No backend data" description="Backends appear with the node's next heartbeat." />}
       />
+
+      <NodeTopDomainsCard id={id} />
 
       {hb && (
         <Card className="gap-2 py-4">

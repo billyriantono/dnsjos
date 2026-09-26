@@ -204,9 +204,14 @@ panel on save and in the agent before rendering.
     "aliases_wanted": 8, "min_ok": 3, "refresh_interval_h": 6
   },
   "tuning": {"udp_buffer_bytes": 16777216, "tcp_workers": 0, "extra_lua": ""},
-  "webserver": {"listen": "127.0.0.1:8083", "prometheus_acl": ["127.0.0.1/32"]}
+  "webserver": {"listen": "127.0.0.1:8083", "prometheus_acl": ["127.0.0.1/32"]},
+  "analytics": {"enabled": true, "sample_rate": 1, "top_k": 5000, "stream_addr": "127.0.0.1:6001"}  // §19
 }
 ```
+
+Specs stored before a section existed decode with that section's defaults
+(`ConfigSpec.UnmarshalJSON`; today only `analytics`). When `analytics.enabled`,
+`sample_rate` must be 1..1000, `top_k` 100..50000 and `stream_addr` an ip:port.
 
 ### 6.1 Defaults
 
@@ -339,6 +344,7 @@ All agent requests carry `Authorization: Bearer <node_token>` and
 | `GET /agent/v1/blocklist` | CDB stream (see §7.4) |
 | `POST /agent/v1/heartbeat` | `api.Heartbeat` → `api.HeartbeatAck{config_version, blocklist_sha256, commands[]}` |
 | `POST /agent/v1/blocked` | `api.BlockedBatch{items:[{day, qname, qtype, count}]}` → 204 |
+| `POST /agent/v1/analytics` | `api.AnalyticsBatch` (§19; body ≤ `api.AnalyticsMaxBody` = 10 MiB, checked by `AnalyticsBatch.Validate` → 422 `invalid_batch`) → 204 |
 | `POST /agent/v1/cgk` | `api.CGKReport{measured_at, aliases[], rewrite_ranges[], pools:[{net, colos[]}], ok bool, message}` → 204 |
 
 `api.Heartbeat`:
@@ -470,6 +476,8 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET /api/v1/blocklist/lookup?name=` | `BlocklistLookup{name,blocked,match}` (checks current CDB incl. suffix walk) |
 | `GET /api/v1/reports/blocked?from&to&node_id&limit` | `BlockedReport{total,by_node,by_month,top_domains}` (`from`/`to` are dates `YYYY-MM-DD`) |
 | `GET /api/v1/reports/blocked.csv?...&kind=` | `text/csv` attachment; kind ∈ `api.CSVKinds` (summary / monthly / top) |
+| `GET /api/v1/analytics?from&to&node_id&kind&limit` | `AnalyticsReport{from,to,total,by_qtype,by_rcode,by_day,top}` (§19). `from`/`to` dates `YYYY-MM-DD` (default: last 7 days), `kind` ∈ `api.AnalyticsKinds` (default `queried`), `limit` 1..1000 (default 100); 400 `bad_request` otherwise |
+| `GET /api/v1/analytics.csv?...` | `text/csv` attachment `analytics-<kind>-<from>_<to>.csv`, columns `rank,name,count,share,approximate` |
 | `GET /api/v1/offenders?active=true&node_id` | `List[Offender]` — abusive clients (open + history) |
 | `GET /api/v1/users` · `POST` · `PATCH /users/{id}` · `DELETE /users/{id}` | admin only: `List[User]` · `UserCreate` → 201 `User` · `UserPatch` → `User` · 204 |
 | `GET /api/v1/audit?limit&before` | admin only: `List[AuditEntry]`, newest first, `before` = audit id cursor |
@@ -706,30 +714,45 @@ one is healthy again.
 
 Complements §7/§9 (which only see *blocked* queries) with fleet-wide query analytics.
 No client addresses are collected or stored (top clients is a possible later option).
+Types live in `internal/shared/api/analytics.go`.
 
-* **Stream**: when `analytics.enabled` (new ConfigSpec section, default true), the renderer
-  adds a second dnstap logger to `127.0.0.1:6001` (separate from the blocked stream on
-  :6000) with `DnstapLogResponseAction` on every response AND
-  `addCacheHitResponseAction` (cache hits count too), guarded by
-  `ProbaRule(1 / analytics.sample_rate)` when `sample_rate > 1` (default 1 = every query).
+* **Config** (`ConfigSpec.analytics`, `api.Analytics`): `enabled` (default true),
+  `sample_rate` (default 1, 1..1000), `top_k` (default 5000, 100..50000), `stream_addr`
+  (default `127.0.0.1:6001`). See §6 for defaults of older stored specs.
+* **Stream**: when `analytics.enabled`, the renderer adds a second dnstap logger to
+  `stream_addr` (separate from the blocked stream on :6000) with `DnstapLogResponseAction`
+  on every response AND `addCacheHitResponseAction` (cache hits count too), guarded by
+  `ProbaRule(1 / sample_rate)` when `sample_rate > 1` (default 1 = every query).
   Counts are multiplied back by `sample_rate` in the agent.
 * **Agent aggregation** (bounded memory): per local day, Space-Saving top-K sketches
-  (K = `analytics.top_k`, default 5000) for:
+  (K = `top_k`) for the kinds (`api.AnalyticsKinds`):
   `queried` (raw qname), `queried_grouped` (registered domain via
   golang.org/x/net/publicsuffix EffectiveTLDPlusOne; names without one keep the raw name),
   `nxdomain` (raw qname of NXDOMAIN answers), `servfail` (raw qname of SERVFAIL answers);
-  plus exact counters by qtype and rcode, and total responses. Every 60 s the agent POSTs
-  a delta snapshot to `POST /agent/v1/analytics` (`api.AnalyticsBatch{day, total,
-  by_qtype{}, by_rcode{}, tops: {kind: [{name, count, error}]}}`, error = Space-Saving
-  over-estimate bound) and resets its window; unsent batches spool to disk like §9.4.
-* **Panel storage**: `analytics_daily_totals(day, node_id, total, by_qtype jsonb,
-  by_rcode jsonb)` (upsert-add) and `analytics_top_daily(day, node_id, kind, name,
-  count, pk(day,node_id,kind,name))` (upsert-add). A daily job trims each (day, node, kind)
-  to the top 1000 once the day is over. Retention `analytics_retention_days` (default 400).
-* **API**: `GET /api/v1/analytics?from&to&node_id&kind&limit` → `{total, by_qtype,
-  by_rcode, by_day[{day,total}], top[{rank,name,count,share}]}`; `.csv` export
-  (kind + range in the filename). Viewer.
-* **UI**: new page **Analytics** (`/analytics`): date presets, node filter, kind tabs
+  plus exact counters by qtype (`"A"`, `"AAAA"`, …, `TYPEn` when unknown) and rcode
+  (`"NOERROR"`, `"NXDOMAIN"`, `"SERVFAIL"`, …), and total responses. Every 60 s the agent
+  POSTs the window's delta to `POST /agent/v1/analytics` and resets it; unsent batches
+  spool to disk like §9.4:
+  ```jsonc
+  {"day": "2026-01-02", "total": 0, "sample_rate": 1,
+   "by_qtype": {"A": 0}, "by_rcode": {"NOERROR": 0},
+   "tops": {"queried": [{"name": "example.com", "count": 0, "error": 0}]}}  // error = Space-Saving over-estimate bound
+  ```
+  Names are lower-case without the trailing dot.
+* **Panel storage** (`migrations/0004_analytics`): `analytics_daily_totals(day, node_id,
+  total, by_qtype jsonb, by_rcode jsonb, sampled, pk(day,node_id))` (upsert-add; jsonb maps
+  summed per key; `sampled` ORed from `sample_rate > 1`) and `analytics_top_daily(day,
+  node_id, kind, name, count, error, pk(day,node_id,kind,name))` (upsert-add count and
+  error), index `(day, kind, count desc)`. A daily job trims each (day, node, kind) to the
+  top 1000 once the day is over. Retention: setting `analytics_retention_days` (default
+  400, in `api.Settings`).
+* **API** (§10): `GET /api/v1/analytics` → `api.AnalyticsReport` — `by_day` has every day
+  of the range (zeros included); `top[]` = `{rank (1-based), name, count, share,
+  approximate}` summed over the selected nodes, where `share` = count / `total` for
+  `queried*` and count / `by_rcode["NXDOMAIN"|"SERVFAIL"]` for `nxdomain`/`servfail`,
+  and `approximate` is true when any contributing day was sampled or has `error > 0`.
+  `.csv` export (kind + range in the filename). Viewer.
+* **UI**: new page **Analytics** (`/analytics`, `useAnalytics`): date presets, node filter, kind tabs
   (Top domains [Raw | Grouped toggle], NXDOMAIN, SERVFAIL), top table with share bars,
   qtype/rcode breakdown charts, daily volume chart, CSV export. Node detail gets a
   compact "Top domains today" card. Counts from sampled nodes are marked approximate.

@@ -54,7 +54,7 @@ export function ConfigForm({
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
   const { do53, doh, dot, tls } = s.listen
-  const { blocking: b, abuse: a, cgk: g, cache: c } = s
+  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an } = s
 
   return (
     <Tabs value={tab} onValueChange={(t) => onTabChange(t as TabId)} className="gap-4">
@@ -288,6 +288,43 @@ export function ConfigForm({
             <NumField label="Aliases wanted" path="cgk.aliases_wanted" value={g.aliases_wanted} onChange={(aliases_wanted) => part('cgk', { aliases_wanted })} min={1} max={256} help="How many working aliases the prober keeps." />
             <NumField label="Min OK test sites" path="cgk.min_ok" value={g.min_ok} onChange={(min_ok) => part('cgk', { min_ok })} min={1} max={Math.max(1, g.test_sites.length)} help={`An alias must serve at least this many of the ${g.test_sites.length} test sites.`} />
             <NumField label="Refresh interval" path="cgk.refresh_interval_h" value={g.refresh_interval_h} onChange={(refresh_interval_h) => part('cgk', { refresh_interval_h })} min={1} max={168} unit="hours" />
+          </Grid>
+        </Section>
+      </TabsContent>
+
+      <TabsContent value="analytics" className="grid gap-4">
+        <Section
+          title="Traffic analytics"
+          description="Counts every answered query (cache hits included) into daily top-domain, NXDOMAIN, SERVFAIL, query-type and response-code reports. No client addresses are collected."
+          enabled={an.enabled}
+          onEnabledChange={(enabled) => part('analytics', { enabled })}
+        >
+          <Grid>
+            <NumField
+              label="Sample rate"
+              path="analytics.sample_rate"
+              value={an.sample_rate}
+              onChange={(sample_rate) => part('analytics', { sample_rate })}
+              min={1}
+              max={1000}
+              unit="1 in N"
+              help={
+                an.sample_rate > 1
+                  ? `Logs 1 in ${an.sample_rate} answers and multiplies counts by ${an.sample_rate}: less CPU on busy nodes, but all counts become approximate estimates.`
+                  : 'Every answer is logged; counts are exact (except the long tail of the top lists). Raise on very busy nodes to save CPU — counts then become approximate.'
+              }
+            />
+            <NumField
+              label="Top-K"
+              path="analytics.top_k"
+              value={an.top_k}
+              onChange={(top_k) => part('analytics', { top_k })}
+              min={100}
+              max={50000}
+              unit="names"
+              help="Names tracked per list and day on the node. Larger = more accurate long tail, more agent memory."
+            />
+            <TextField label="Stream address" path="analytics.stream_addr" value={an.stream_addr} onChange={(stream_addr) => part('analytics', { stream_addr })} placeholder="127.0.0.1:6001" help="dnstap listener of the agent. Keep it on loopback." />
           </Grid>
         </Section>
       </TabsContent>

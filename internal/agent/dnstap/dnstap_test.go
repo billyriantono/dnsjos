@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
@@ -46,7 +47,7 @@ func TestServeAggregates(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	agg := &Agg{Cap: 3, Loc: time.UTC}
 	done := make(chan error)
-	go func() { done <- Serve(ctx, l, agg, discard) }()
+	go func() { done <- Serve(ctx, l, agg.Observe, discard) }()
 
 	day1 := time.Date(2026, 9, 26, 23, 59, 0, 0, time.UTC)
 	day2 := day1.Add(2 * time.Minute)
@@ -130,15 +131,15 @@ func TestSpool(t *testing.T) {
 	dir := t.TempDir()
 	var got []api.BlockedBatch
 	fail := errors.New("panel down")
-	s := &Spool{Dir: dir, MaxFiles: 2, Log: discard, Post: func(_ context.Context, b api.BlockedBatch) error {
+	s := &Spool[api.BlockedBatch]{Dir: dir, MaxFiles: 2, Log: discard, Post: func(_ context.Context, b api.BlockedBatch) error {
 		if fail != nil {
 			return fail
 		}
 		got = append(got, b)
 		return nil
 	}}
-	item := func(n int64) []api.BlockedItem {
-		return []api.BlockedItem{{Day: "2026-09-27", QName: "x", QType: "A", Count: n}}
+	item := func(n int64) []api.BlockedBatch {
+		return BlockedBatches([]api.BlockedItem{{Day: "2026-09-27", QName: "x", QType: "A", Count: n}})
 	}
 	s.Flush(context.Background(), item(1))
 	s.Flush(context.Background(), item(2))
@@ -160,4 +161,16 @@ func TestSpool(t *testing.T) {
 	if ents, _ := os.ReadDir(dir); len(ents) != 0 {
 		t.Fatalf("rejected batch was spooled: %v", ents)
 	}
+
+	// MaxBytes keeps only the newest batches that fit
+	fail = errors.New("panel down")
+	s.MaxFiles, s.MaxBytes = 10, 150
+	for n := range int64(4) {
+		s.Flush(context.Background(), item(10+n))
+	}
+	if f := s.files(); len(f) != 2 || !strings.Contains(read(f[1]), `"count":13`) {
+		t.Fatalf("spool by size: %v", f)
+	}
 }
+
+func read(p string) string { b, _ := os.ReadFile(p); return string(b) }

@@ -1,0 +1,173 @@
+// Package analytics stores the agents' per-day query analytics and serves the reports
+// (SPEC §19).
+package analytics
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+
+	"github.com/billyriantono/dnsjos/internal/panel/app"
+	"github.com/billyriantono/dnsjos/internal/panel/httpx"
+	"github.com/billyriantono/dnsjos/internal/shared/api"
+)
+
+const (
+	maxItemsPerKind = 50_000 // = the largest allowed top_k
+	keepPerGroup    = 1000   // rows kept per (day, node, kind) once the day is over
+)
+
+type svc struct{ d *app.Deps }
+
+// Register mounts the analytics routes and the trim/retention job.
+func Register(r *app.Router, d *app.Deps) {
+	s := &svc{d}
+	r.Agent("POST /agent/v1/analytics", s.ingest)
+	r.Viewer("GET /api/v1/analytics", s.report)
+	r.Viewer("GET /api/v1/analytics.csv", s.csv)
+	d.Jobs.Every("analytics-maintenance", time.Hour, func(ctx context.Context) error {
+		if err := s.trim(ctx); err != nil {
+			return err
+		}
+		return s.retention(ctx)
+	})
+}
+
+func (s *svc) ingest(w http.ResponseWriter, r *http.Request) {
+	ctx, id := r.Context(), app.NodeIDFrom(r.Context())
+	var b api.AnalyticsBatch
+	if err := httpx.ReadJSON(r, &b, api.AnalyticsMaxBody); err != nil {
+		httpx.BadRequest(w, err.Error())
+		return
+	}
+	err := b.Validate()
+	for kind, items := range b.Tops {
+		if err == nil && len(items) > maxItemsPerKind {
+			err = fmt.Errorf("tops.%s: at most %d items", kind, maxItemsPerKind)
+		}
+	}
+	if err != nil {
+		httpx.WriteError(w, http.StatusUnprocessableEntity, "invalid_batch", err.Error())
+		return
+	}
+	// Out-of-range days are dropped, not rejected: the agent would retry a spooled batch forever.
+	day, _ := time.Parse(time.DateOnly, b.Day)
+	now := time.Now().UTC()
+	if day.After(now.AddDate(0, 0, 1)) || day.Before(now.AddDate(0, 0, -s.d.Settings.Get().AnalyticsRetentionDays)) {
+		s.d.Log.Warn("analytics batch dropped: day out of range", "node_id", id, "day", b.Day)
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	qtypes, _ := json.Marshal(nonNil(b.ByQType))
+	rcodes, _ := json.Marshal(nonNil(b.ByRcode))
+	var kinds, names []string
+	var counts, errs []int64
+	for kind, items := range b.Tops {
+		for _, it := range items {
+			n := strings.ToLower(strings.TrimSuffix(it.Name, "."))
+			if n == "" {
+				n = "."
+			}
+			kinds, names = append(kinds, kind), append(names, n)
+			counts, errs = append(counts, it.Count), append(errs, it.Error)
+		}
+	}
+	err = pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
+		// ON CONFLICT DO UPDATE locks the row, so concurrent batches add up correctly.
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO analytics_daily_totals AS t (day, node_id, total, by_qtype, by_rcode, sampled)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (day, node_id) DO UPDATE SET
+				total = t.total + EXCLUDED.total,
+				by_qtype = `+addMaps("t.by_qtype", "EXCLUDED.by_qtype")+`,
+				by_rcode = `+addMaps("t.by_rcode", "EXCLUDED.by_rcode")+`,
+				sampled = t.sampled OR EXCLUDED.sampled`,
+			b.Day, id, b.Total, qtypes, rcodes, b.SampleRate > 1); err != nil {
+			return err
+		}
+		if len(names) == 0 {
+			return nil
+		}
+		// GROUP BY: one INSERT .. ON CONFLICT cannot touch the same row twice.
+		_, err := tx.Exec(ctx, `
+			INSERT INTO analytics_top_daily AS t (day, node_id, kind, name, count, error)
+			SELECT $1::date, $2::uuid, k, n, sum(c), sum(e)
+			FROM unnest($3::text[], $4::text[], $5::bigint[], $6::bigint[]) AS x(k, n, c, e)
+			GROUP BY k, n
+			ON CONFLICT (day, node_id, kind, name) DO UPDATE SET
+				count = t.count + EXCLUDED.count, error = t.error + EXCLUDED.error`,
+			b.Day, id, kinds, names, counts, errs)
+		return err
+	})
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// addMaps is the SQL for per-key addition of two {"key": number} jsonb maps.
+func addMaps(a, b string) string {
+	return `(SELECT coalesce(jsonb_object_agg(k, v), '{}') FROM (
+		SELECT k, sum(v::bigint) AS v FROM (
+			SELECT * FROM jsonb_each_text(` + a + `) UNION ALL SELECT * FROM jsonb_each_text(` + b + `)
+		) x(k, v) GROUP BY k) y)`
+}
+
+func nonNil(m map[string]int64) map[string]int64 {
+	if m == nil {
+		return map[string]int64{}
+	}
+	return m
+}
+
+// trim keeps the top keepPerGroup names of every (day, node, kind) of ended days. Days are
+// the agents' local days, so a day counts as over once it has ended in every time zone.
+// Idempotent: only groups still above the cap are touched, which also catches late
+// (spooled) batches for already trimmed days.
+// ponytail: the HAVING pass seq-scans every ended day each run (the delete side is
+// skipped when nothing is over the cap); track a trimmed-up-to day if that gets slow.
+func (s *svc) trim(ctx context.Context) error {
+	tag, err := s.d.Pool.Exec(ctx, `
+		WITH g AS (
+			SELECT day, node_id, kind FROM analytics_top_daily WHERE day < current_date - 1
+			GROUP BY day, node_id, kind HAVING count(*) > $1),
+		r AS (
+			SELECT t.day, t.node_id, t.kind, t.name,
+			       row_number() OVER (PARTITION BY t.day, t.node_id, t.kind ORDER BY t.count DESC, t.name) AS rn
+			FROM analytics_top_daily t JOIN g USING (day, node_id, kind))
+		DELETE FROM analytics_top_daily t USING r
+		WHERE r.rn > $1 AND t.day = r.day AND t.node_id = r.node_id AND t.kind = r.kind AND t.name = r.name`,
+		keepPerGroup)
+	if err != nil {
+		return fmt.Errorf("analytics trim: %w", err)
+	}
+	if n := tag.RowsAffected(); n > 0 {
+		s.d.Log.Info("analytics trimmed", "deleted", n)
+	}
+	return nil
+}
+
+// retention drops days older than analytics_retention_days (< 1 disables it).
+func (s *svc) retention(ctx context.Context) error {
+	days := s.d.Settings.Get().AnalyticsRetentionDays
+	if days < 1 {
+		return nil
+	}
+	for _, t := range []string{"analytics_top_daily", "analytics_daily_totals"} {
+		tag, err := s.d.Pool.Exec(ctx, "DELETE FROM "+t+" WHERE day < current_date - $1::int", days)
+		if err != nil {
+			return fmt.Errorf("retention %s: %w", t, err)
+		}
+		if n := tag.RowsAffected(); n > 0 {
+			s.d.Log.Info("retention", "table", t, "deleted", n)
+		}
+	}
+	return nil
+}

@@ -167,6 +167,11 @@ func (c *Client) PostBlocked(ctx context.Context, b api.BlockedBatch) error {
 	return err
 }
 
+func (c *Client) PostAnalytics(ctx context.Context, b api.AnalyticsBatch) error {
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/analytics", b, nil, nil)
+	return err
+}
+
 func (c *Client) PostCGK(ctx context.Context, r api.CGKReport) error {
 	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/cgk", r, nil, nil)
 	return err
