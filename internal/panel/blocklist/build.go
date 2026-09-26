@@ -44,11 +44,14 @@ type Service struct {
 	d      *app.Deps
 	dir    string // $DATA_DIR/blocklist
 	client *http.Client
-	mu     sync.Mutex // single-flight build
+	// rangeClient speaks HTTP/1.1 only: over HTTP/2 every "parallel" range would be
+	// multiplexed onto one TCP connection, which is slower than a single stream.
+	rangeClient *http.Client
+	mu          sync.Mutex // single-flight build
 }
 
 func newService(d *app.Deps) *Service {
-	return &Service{d: d, dir: filepath.Join(d.Cfg.DataDir, "blocklist"), client: &http.Client{Timeout: 120 * time.Second}}
+	return &Service{d: d, dir: filepath.Join(d.Cfg.DataDir, "blocklist"), client: newHTTPClient(true), rangeClient: newHTTPClient(false)}
 }
 
 func (s *Service) artifact(sha string) string { return filepath.Join(s.dir, sha+".cdb") }

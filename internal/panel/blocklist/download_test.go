@@ -5,6 +5,8 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -64,7 +66,7 @@ func randBytes(t *testing.T, n int) []byte {
 // fetchVia runs the first GET and download() like fetch does; returns the file content.
 func fetchVia(t *testing.T, url string, segs int) (data []byte, streams int, etag string) {
 	t.Helper()
-	s := &Service{d: &app.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, client: &http.Client{Timeout: time.Minute}}
+	s := &Service{d: &app.Deps{Log: slog.New(slog.NewTextHandler(io.Discard, nil))}, client: &http.Client{Timeout: time.Minute}, rangeClient: newHTTPClient(false)}
 	ctx := context.Background()
 	resp, err := s.get(ctx, url, nil)
 	if err != nil {
@@ -209,6 +211,38 @@ func TestFetchStatus(t *testing.T) {
 	}{{1, "ok: 217.3 MB in 2.9 s (74.9 MB/s, 1 stream)"}, {8, "ok: 217.3 MB in 2.9 s (74.9 MB/s, 8 streams)"}} {
 		if got := fetchStatus(217_300_000, 2900*time.Millisecond, tc.streams); got != tc.want {
 			t.Errorf("got %q want %q", got, tc.want)
+		}
+	}
+}
+
+// Range segments must each get their own TCP connection: over HTTP/2 they would be
+// multiplexed onto one connection and be slower than a single stream.
+func TestRangeClientAvoidsHTTP2(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, r.ProtoMajor)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+	roots := srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs
+	for _, c := range []struct {
+		http2 bool
+		want  string
+	}{{true, "2"}, {false, "1"}} {
+		cl := newHTTPClient(c.http2)
+		tr := cl.Transport.(*http.Transport)
+		if tr.TLSClientConfig == nil {
+			tr.TLSClientConfig = &tls.Config{}
+		}
+		tr.TLSClientConfig.RootCAs = roots
+		resp, err := cl.Get(srv.URL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(b) != c.want {
+			t.Errorf("http2=%v: server saw HTTP/%s, want HTTP/%s", c.http2, b, c.want)
 		}
 	}
 }

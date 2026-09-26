@@ -2,6 +2,7 @@ package blocklist
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -22,6 +23,20 @@ const (
 // ETag, a different range): the parallel download is abandoned.
 var errNoRanges = errors.New("server does not honour byte ranges for this ETag")
 
+// newHTTPClient has no overall timeout: a 220 MB list on a slow day takes minutes; the
+// build context bounds the total and a stalled server is caught by the header timeout.
+func newHTTPClient(http2 bool) *http.Client {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	t.ResponseHeaderTimeout = 60 * time.Second
+	t.MaxIdleConnsPerHost = 16
+	if !http2 {
+		t.ForceAttemptHTTP2 = false
+		t.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{} // disables h2
+		t.TLSClientConfig = &tls.Config{NextProtos: []string{"http/1.1"}}
+	}
+	return &http.Client{Transport: t}
+}
+
 func (s *Service) get(ctx context.Context, url string, hdr map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -32,6 +47,9 @@ func (s *Service) get(ctx context.Context, url string, hdr map[string]string) (*
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	for k, v := range hdr {
 		req.Header.Set(k, v)
+	}
+	if hdr["Range"] != "" && s.rangeClient != nil {
+		return s.rangeClient.Do(req)
 	}
 	return s.client.Do(req)
 }
