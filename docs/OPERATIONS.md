@@ -19,12 +19,26 @@ Live servers run dnsdist with the dnsdist_ootb YAML wrapper. Adoption keeps the 
 package, the webserver password/API key and console key (Prometheus/Grafana scrapes and
 `dnsdist-offenders` keep working), the webserver listen address + ACL, the DoH/DoT
 certificates and the Do53 listen addresses. ACL, upstreams, blocking, abuse and CGK come
-from the profile — the `default` profile equals the production values.
+from the profile — import your deployment's profile (client ACL, upstreams, blockpage)
+before adopting. Two things to check in that profile first:
+
+* **`abuse.trusted`**: add your infrastructure ranges (monitoring, resolvers you forward
+  from, load balancers, office/NOC prefixes). The rate limits and dynamic blocks apply to
+  everything else; the default only trusts loopback.
+* **Response-IP blocking is opt-in** (`blocking.block_response_ips`, default off). When on,
+  A answers containing a listed IP are rewritten to the blockpage — the legacy rules only
+  matched those IPs and never changed answers, so turning it on changes behaviour for
+  customers. Adoption sends `block_response_ips: false` as a node override; remove that
+  override (node page) only when you want the new behaviour.
 
 **One node at a time, least busy first.** Before each node confirm in the panel that every
 other node is `online`.
 
-1. Panel → Nodes → Add node → create a token (pick the profile, normally `default`).
+1. Panel → Nodes → Add node → create a token **with the node name set** (and the
+   profile). Adoption needs a node-scoped token: an unscoped token never re-keys an
+   existing node (the enroll fails with "a node with this name already exists"), so
+   re-running the adoption, e.g. after a failed first attempt, only works with a token
+   scoped to that node name.
 2. On the node:
 
    ```sh

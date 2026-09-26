@@ -107,6 +107,20 @@ func LockUpgrades(ctx context.Context, q Querier) error {
 	return err
 }
 
+// MaxBatchKey caps the agents' Idempotency-Key header.
+const MaxBatchKey = 255
+
+// ClaimBatch records an agent batch's idempotency key in the caller's transaction, so the
+// key commits together with the batch's data. false = already committed: skip the batch.
+// An empty key (older agents) always claims.
+func ClaimBatch(ctx context.Context, q Querier, nodeID, key string) (bool, error) {
+	if key == "" {
+		return true, nil
+	}
+	tag, err := q.Exec(ctx, "INSERT INTO ingested_batches (node_id, batch_key) VALUES ($1, $2) ON CONFLICT DO NOTHING", nodeID, key)
+	return tag.RowsAffected() == 1, err
+}
+
 // Postgres error helpers used to map DB errors to HTTP statuses.
 
 func IsUniqueViolation(err error) bool { return pgCode(err) == "23505" }

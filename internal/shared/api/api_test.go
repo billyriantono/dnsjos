@@ -165,7 +165,21 @@ func TestAnalyticsBatchValidate(t *testing.T) {
 	if err := ok.Validate(); err != nil {
 		t.Fatal(err)
 	}
+	cum := ok
+	cum.TopsMode, cum.Epoch, cum.Evicted = AnalyticsTopsCumulative, "e1", map[string][]string{AnalyticsQueried: {"gone.example"}}
+	if err := cum.Validate(); err != nil {
+		t.Fatal(err)
+	}
 	for name, mutate := range map[string]func(*AnalyticsBatch){
+		"tops_mode":     func(b *AnalyticsBatch) { b.TopsMode = "absolute" },
+		"no epoch":      func(b *AnalyticsBatch) { b.TopsMode = AnalyticsTopsCumulative },
+		"delta evicted": func(b *AnalyticsBatch) { b.Evicted = map[string][]string{AnalyticsQueried: {"x.example"}} },
+		"evicted kind": func(b *AnalyticsBatch) {
+			b.TopsMode, b.Epoch, b.Evicted = AnalyticsTopsCumulative, "e", map[string][]string{"clients": nil}
+		},
+		"evicted bad name": func(b *AnalyticsBatch) {
+			b.TopsMode, b.Epoch, b.Evicted = AnalyticsTopsCumulative, "e", map[string][]string{AnalyticsQueried: {""}}
+		},
 		"day":         func(b *AnalyticsBatch) { b.Day = "2026-1-2" },
 		"total":       func(b *AnalyticsBatch) { b.Total = -1 },
 		"sample_rate": func(b *AnalyticsBatch) { b.SampleRate = 0 },

@@ -34,6 +34,7 @@ import (
 
 	"github.com/colinmarc/cdb"
 
+	"github.com/billyriantono/dnsjos/internal/agent/client"
 	"github.com/billyriantono/dnsjos/internal/agent/dnsdist"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	keys "github.com/billyriantono/dnsjos/internal/shared/cdb"
@@ -87,6 +88,7 @@ func TestEndToEnd(t *testing.T) {
 	spec := api.DefaultConfigSpec()
 	spec.Listen.Do53 = api.Do53{Enabled: true, Addresses: []string{"127.0.0.1:" + dnsPort}, ReusePortListeners: 1}
 	spec.Webserver = api.Webserver{Listen: webAddr, PrometheusACL: []string{"127.0.0.1/32"}}
+	spec.Blocking.BlockResponseIPs = true // opt-in; asserted with one.one.one.one below
 	spec.Upstreams.Servers = []api.Upstream{
 		{Address: "1.1.1.1:53", Weight: 10, Order: 1, Sockets: 2, Name: "cloudflare1"},
 		{Address: "8.8.8.8:53", Weight: 10, Order: 1, Sockets: 2, Name: "google1"},
@@ -134,7 +136,8 @@ func TestEndToEnd(t *testing.T) {
 	p.must(201, "POST", "/api/v1/enrollment-tokens", api.EnrollmentTokenCreate{NodeName: "e2e-node"}, &tok)
 	run(t, "", nil, agentBin, "enroll", "--panel", p.base, "--token", tok.Token, "--root", root, "--no-systemd")
 	var ac struct {
-		NodeID string `json:"node_id"`
+		NodeID    string `json:"node_id"`
+		NodeToken string `json:"node_token"`
 	}
 	readJSON(t, filepath.Join(root, "etc/dnsjos/agent.json"), &ac)
 	conf := filepath.Join(root, "etc/dnsdist/dnsdist.conf")
@@ -198,6 +201,20 @@ func TestEndToEnd(t *testing.T) {
 		return slices.ContainsFunc(rep.TopDomains, func(d api.TopDomain) bool { return d.QName == "blocked.example" }), fmt.Sprintf("%+v", rep)
 	})
 
+	// ── a replayed batch (same Idempotency-Key, e.g. the answer was lost) counts once ──
+	cl := client.New(p.base, ac.NodeToken, "e2e")
+	replay := api.BlockedBatch{Items: []api.BlockedItem{{Day: day.Format(time.DateOnly), QName: "replay-e2e.example", QType: "A", Count: 7}}}
+	for range 2 {
+		if err := cl.PostBlocked(context.Background(), "e2e-replay-key", replay); err != nil {
+			t.Fatalf("posting the replayed batch: %v", err)
+		}
+	}
+	var rep api.BlockedReport
+	p.must(200, "GET", q, nil, &rep)
+	if i := slices.IndexFunc(rep.TopDomains, func(d api.TopDomain) bool { return d.QName == "replay-e2e.example" }); i < 0 || rep.TopDomains[i].Count != 7 {
+		t.Errorf("replayed blocked batch: want replay-e2e.example counted once (7), got %+v", rep.TopDomains)
+	}
+
 	// ── a new published version is re-rendered, dnsdist restarted, and served ──
 	spec.Blocking.BlockpageIPv4 = "10.9.9.9"
 	p.must(201, "POST", "/api/v1/profiles/"+def+"/versions", api.VersionCreate{Spec: spec, Comment: "e2e v2"}, &ver)
@@ -227,6 +244,25 @@ func TestEndToEnd(t *testing.T) {
 			has(grouped, "example.com") && has(grouped, "example.invalid") && has(nxd, nx) && raw.ByRcode["NXDOMAIN"] > 0
 		return ok, fmt.Sprintf("raw %+v\ngrouped %+v\nnxdomain %+v", raw, grouped.Top, nxd.Top)
 	})
+	// cumulative tops: a later flush resends the name's running count, which must
+	// replace (not add to) the stored one
+	count := func(name string) int64 {
+		rep := aq(api.AnalyticsQueried)
+		if i := slices.IndexFunc(rep.Top, func(e api.AnalyticsTopEntry) bool { return e.Name == name }); i >= 0 {
+			return rep.Top[i].Count
+		}
+		return 0
+	}
+	before := count("www.example.com")
+	dig("www.example.com", "A")
+	eventually(t, 30*time.Second, "www.example.com counted once more", func() (bool, string) {
+		c := count("www.example.com")
+		return c == before+1, fmt.Sprintf("before %d, now %d", before, c)
+	})
+	time.Sleep(12 * time.Second) // two more flushes without traffic to the name
+	if c := count("www.example.com"); c != before+1 {
+		t.Errorf("www.example.com drifted to %d, want %d", c, before+1)
+	}
 }
 
 // adoptDryRun: a fake root holding a dnsdist_ootb server (reference yml with test
@@ -247,6 +283,8 @@ func adoptDryRun(t *testing.T, p *panel, repo, agentBin, root, db string) {
 		t.Fatalf("unreplaced secret in yml:\n%s", y)
 	}
 	os.WriteFile(filepath.Join(etc, "dnsdist.yml"), []byte(y), 0o640)
+	lua, _ := os.ReadFile(filepath.Join(repo, "internal/agent/testdata/abuse.lua"))
+	os.WriteFile(filepath.Join(etc, "abuse.lua"), lua, 0o640)
 	oldConf, _ := os.ReadFile(filepath.Join(repo, "internal/agent/testdata/dnsdist-ootb.conf"))
 	os.WriteFile(filepath.Join(etc, "dnsdist.conf"), oldConf, 0o640)
 	w, err := cdb.Create(filepath.Join(etc, "db/blacklist.db"))
@@ -281,6 +319,9 @@ func adoptDryRun(t *testing.T, p *panel, repo, agentBin, root, db string) {
 	var over map[string]any
 	json.Unmarshal(node.Overrides, &over)
 	wantOver := map[string]any{
+		"abuse": map[string]any{"trusted": []any{"127.0.0.0/8", "::1/128", "127.0.0.1/32", "192.0.2.0/24", "198.51.100.7/32",
+			"2001:db8::1/128", "2001:db8:100::/48"}},
+		"blocking": map[string]any{"block_response_ips": false},
 		"listen": map[string]any{
 			"do53": map[string]any{"addresses": []any{"0.0.0.0:53", "[::]:53"}},
 			"doh":  map[string]any{"enabled": true, "addresses": []any{"0.0.0.0:443", "[::]:443"}, "path": "/dns-query"},

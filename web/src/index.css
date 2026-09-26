@@ -12,7 +12,7 @@
   --card-foreground: oklch(0.141 0.005 285.823);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: oklch(0.48 0.11 170);
+  --primary: oklch(0.5 0.17 258);
   --primary-foreground: oklch(0.985 0 0);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -26,20 +26,25 @@
   --info: oklch(0.5 0.14 250);
   --border: oklch(0.92 0.004 286.32);
   --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.48 0.11 170);
+  --ring: oklch(0.5 0.17 258);
   --chart-1: oklch(0.6 0.13 170);
   --chart-2: oklch(0.6 0.15 250);
   --chart-3: oklch(0.7 0.16 75);
   --chart-4: oklch(0.6 0.2 300);
   --chart-5: oklch(0.63 0.2 25);
-  --sidebar: oklch(0.975 0.001 286);
-  --sidebar-foreground: oklch(0.3 0.006 285.885);
-  --sidebar-primary: oklch(0.48 0.11 170);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.94 0.003 286.32);
-  --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.48 0.11 170);
+  /* Brand: navy chrome (sidebar + top bar, both themes) with a gold accent. */
+  --brand-navy: oklch(0.25 0.07 262);
+  --brand-navy-foreground: oklch(0.96 0.01 262);
+  --brand-navy-muted: oklch(0.8 0.035 262);
+  --brand-gold: oklch(0.82 0.14 82);
+  --sidebar: var(--brand-navy);
+  --sidebar-foreground: var(--brand-navy-foreground);
+  --sidebar-primary: var(--brand-gold);
+  --sidebar-primary-foreground: oklch(0.22 0.05 262);
+  --sidebar-accent: oklch(1 0 0 / 9%);
+  --sidebar-accent-foreground: oklch(1 0 0);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: var(--brand-gold);
 }
 
 .dark {
@@ -49,8 +54,8 @@
   --card-foreground: oklch(0.975 0 0);
   --popover: oklch(0.2 0.006 285.885);
   --popover-foreground: oklch(0.975 0 0);
-  --primary: oklch(0.72 0.14 170);
-  --primary-foreground: oklch(0.18 0.03 170);
+  --primary: oklch(0.7 0.14 255);
+  --primary-foreground: oklch(0.18 0.05 262);
   --secondary: oklch(0.274 0.006 286.033);
   --secondary-foreground: oklch(0.985 0 0);
   --muted: oklch(0.26 0.006 286.033);
@@ -63,20 +68,13 @@
   --info: oklch(0.68 0.15 250);
   --border: oklch(1 0 0 / 10%);
   --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.72 0.14 170);
+  --ring: oklch(0.7 0.14 255);
   --chart-1: oklch(0.72 0.14 170);
   --chart-2: oklch(0.68 0.15 250);
   --chart-3: oklch(0.8 0.15 80);
   --chart-4: oklch(0.68 0.2 300);
   --chart-5: oklch(0.7 0.19 25);
-  --sidebar: oklch(0.18 0.006 285.885);
-  --sidebar-foreground: oklch(0.9 0.005 286);
-  --sidebar-primary: oklch(0.72 0.14 170);
-  --sidebar-primary-foreground: oklch(0.18 0.03 170);
-  --sidebar-accent: oklch(0.26 0.006 286.033);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.72 0.14 170);
+  --brand-navy: oklch(0.22 0.06 262);
 }
 
 @theme inline {
@@ -110,6 +108,10 @@
   --color-chart-3: var(--chart-3);
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
+  --color-brand-navy: var(--brand-navy);
+  --color-brand-navy-foreground: var(--brand-navy-foreground);
+  --color-brand-navy-muted: var(--brand-navy-muted);
+  --color-brand-gold: var(--brand-gold);
   --color-sidebar: var(--sidebar);
   --color-sidebar-foreground: var(--sidebar-foreground);
   --color-sidebar-primary: var(--sidebar-primary);

@@ -39,18 +39,45 @@ func TestAdoptOOTB(t *testing.T) {
 		t.Fatalf("secrets: %+v", a.Secrets)
 	}
 	patch, _ := json.Marshal(a.Overrides)
-	want := `{"listen":{"do53":{"addresses":["0.0.0.0:53","[::]:53"]},` +
+	want := `{"blocking":{"block_response_ips":false},"listen":{"do53":{"addresses":["0.0.0.0:53","[::]:53"]},` +
 		`"doh":{"addresses":["0.0.0.0:443","[::]:443"],"enabled":true,"path":"/dns-query"},"dot":{"addresses":["0.0.0.0:853","[::]:853"],"enabled":true},` +
 		`"tls":{"cert_file":"/etc/dnsdist/tls/cert.pem","key_file":"/etc/dnsdist/tls/key.pem"}},` +
 		`"webserver":{"listen":"0.0.0.0:8083","prometheus_acl":["127.0.0.1/8","198.51.100.16/29","198.51.100.8/29","198.51.100.24/29","198.51.100.32/29"]}}`
 	if string(patch) != want {
 		t.Fatalf("overrides:\n got %s\nwant %s", patch, want)
 	}
+	if _, ok := a.Overrides["upstreams"]; ok {
+		t.Fatal("adoption must not set upstreams")
+	}
+	checkMerge(t, patch)
+
+	// abuse.lua next to the yml: its trusted table becomes abuse.trusted
+	lua, _ := os.ReadFile("testdata/abuse.lua")
+	os.WriteFile(filepath.Join(filepath.Dir(p), "abuse.lua"), lua, 0o600)
+	if a, err = adoptOOTB(p); err != nil {
+		t.Fatal(err)
+	}
+	abuse, _ := json.Marshal(a.Overrides["abuse"])
+	if want := `{"trusted":["127.0.0.0/8","::1/128","127.0.0.1/32","192.0.2.0/24","198.51.100.7/32","2001:db8::1/128","2001:db8:100::/48"]}`; string(abuse) != want {
+		t.Fatalf("abuse:\n got %s\nwant %s", abuse, want)
+	}
+	if len(a.Warnings) != 1 || !strings.Contains(a.Warnings[0], `"not-an-ip"`) {
+		t.Fatalf("warnings %q", a.Warnings)
+	}
+	patch, _ = json.Marshal(a.Overrides)
+	checkMerge(t, patch)
+}
+
+func checkMerge(t *testing.T, patch []byte) {
+	t.Helper()
 	spec, err := api.MergeSpec(api.DefaultConfigSpec(), patch)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := spec.Validate(); err != nil {
 		t.Fatalf("merged spec invalid: %v", err)
+	}
+	if spec.Blocking.BlockResponseIPs {
+		t.Fatal("adopted node blocks response IPs")
 	}
 }

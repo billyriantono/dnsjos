@@ -435,6 +435,11 @@ const maxBlockedItems = 250_000
 
 func (s *svc) blocked(w http.ResponseWriter, r *http.Request) {
 	ctx, id := r.Context(), app.NodeIDFrom(r.Context())
+	key := r.Header.Get(api.IdempotencyHeader)
+	if len(key) > db.MaxBatchKey {
+		httpx.BadRequest(w, "Idempotency-Key: too long")
+		return
+	}
 	var b api.BlockedBatch
 	if err := httpx.ReadJSON(r, &b, httpx.MaxBody); err != nil {
 		httpx.BadRequest(w, err.Error())
@@ -469,17 +474,22 @@ func (s *svc) blocked(w http.ResponseWriter, r *http.Request) {
 	if skipped > 0 {
 		s.d.Log.Warn("blocked batch: invalid items dropped", "node_id", id, "skipped", skipped)
 	}
-	if len(days) > 0 {
+	err := pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
+		if fresh, err := db.ClaimBatch(ctx, tx, id, key); err != nil || !fresh || len(days) == 0 {
+			return err
+		}
 		// GROUP BY: one INSERT .. ON CONFLICT cannot touch the same row twice.
-		if _, err := s.d.Pool.Exec(ctx, `
+		_, err := tx.Exec(ctx, `
 			INSERT INTO blocked_daily (day, node_id, qname, qtype, count)
 			SELECT d::date, $1::uuid, q, t, sum(c) FROM unnest($2::text[], $3::text[], $4::text[], $5::bigint[]) AS x(d, q, t, c)
 			GROUP BY d, q, t
 			ON CONFLICT (day, node_id, qname, qtype) DO UPDATE SET count = blocked_daily.count + EXCLUDED.count`,
-			id, days, names, types, counts); err != nil {
-			httpx.WriteDBError(w, r, err)
-			return
-		}
+			id, days, names, types, counts)
+		return err
+	})
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

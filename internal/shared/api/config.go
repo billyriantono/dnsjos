@@ -157,7 +157,7 @@ func DefaultConfigSpec() ConfigSpec {
 			TXT:              "BLOCKED. UU No 19, pasal 40 (2a dan 2b). Permen Kominfo No 5 2020",
 			SOA:              "blocked.invalid. nobody.blocked.invalid. 1 3600 1200 604800 10800",
 			NS:               "ns.blocked.invalid",
-			BlockResponseIPs: true,
+			BlockResponseIPs: false, // opt-in: legacy rules never altered answers (SPEC §6.4)
 			LogBlocked:       true,
 		},
 		Abuse: Abuse{

@@ -10,12 +10,12 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useTheme, type Theme } from '@/lib/theme'
 
-export function ThemeToggle() {
+export function ThemeToggle({ className }: { className?: string }) {
   const { theme, setTheme } = useTheme()
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="Theme">
+        <Button variant="ghost" size="icon" aria-label="Theme" className={className}>
           <LuSun className="dark:hidden" />
           <LuMoon className="hidden dark:block" />
         </Button>

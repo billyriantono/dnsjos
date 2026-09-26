@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -17,6 +18,9 @@ type Config struct {
 	PublicURL     string // no trailing slash
 	SecureCookies bool
 	LogLevel      slog.Level
+
+	BrandName, BrandTagline string // DNSJOS_BRAND_NAME (default DnsJos), DNSJOS_BRAND_TAGLINE
+	BrandDir                string // DNSJOS_BRAND_DIR (default $DATA_DIR/branding)
 
 	BootstrapAdminEmail    string
 	BootstrapAdminPassword string
@@ -30,7 +34,10 @@ func Load() (Config, error) {
 		PublicURL:              strings.TrimRight(env("DNSJOS_PUBLIC_URL", "http://127.0.0.1:8080"), "/"),
 		BootstrapAdminEmail:    os.Getenv("DNSJOS_BOOTSTRAP_ADMIN_EMAIL"),
 		BootstrapAdminPassword: os.Getenv("DNSJOS_BOOTSTRAP_ADMIN_PASSWORD"),
+		BrandName:              env("DNSJOS_BRAND_NAME", "DnsJos"),
+		BrandTagline:           os.Getenv("DNSJOS_BRAND_TAGLINE"),
 	}
+	c.BrandDir = env("DNSJOS_BRAND_DIR", filepath.Join(c.DataDir, "branding"))
 	u, err := url.Parse(c.PublicURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return c, fmt.Errorf("DNSJOS_PUBLIC_URL: %q is not an http(s) URL", c.PublicURL)

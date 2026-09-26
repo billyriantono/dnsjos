@@ -718,3 +718,23 @@ export interface Meta {
   agent_version: string
   supported_series: string[]
 }
+
+// ─── §15 Branding (branding.go) — public, no session needed ────────────────
+export type BrandingAssetKey =
+  | 'login_logo'
+  | 'navbar_light'
+  | 'navbar_dark'
+  | 'login_bg'
+  | 'login_bg_mobile'
+  | 'cloud'
+  | 'favicon_ico'
+  | 'icon_192'
+  | 'icon_512'
+  | 'apple_touch'
+
+/** GET /api/v1/branding. Each asset is a cache-busted URL ('/branding/<file>?v=<mtime>') or null when absent. */
+export interface Branding {
+  name: string
+  tagline: string
+  assets: Record<BrandingAssetKey, string | null>
+}

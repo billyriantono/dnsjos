@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -91,11 +94,47 @@ func yamlScalar(v string) string {
 type adoption struct {
 	Secrets   Secrets
 	Overrides map[string]any // JSON merge patch over the profile spec
+	Warnings  []string
+}
+
+// trustedRe matches the `local trusted = { ... }` table of a dnsdist_ootb abuse.lua.
+var (
+	trustedRe = regexp.MustCompile(`(?s)local\s+trusted\s*=\s*\{(.*?)\}`)
+	luaStrRe  = regexp.MustCompile(`"([^"]*)"|'([^']*)'`)
+	luaComRe  = regexp.MustCompile(`--[^\n]*`)
+)
+
+// parseTrusted returns the prefixes of abuse.lua's trusted table (bare IPs as /32 or
+// /128) merged with the loopback defaults; nil when the file has no such table.
+func parseTrusted(path string) (trusted, warnings []string, err error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	m := trustedRe.FindSubmatch(raw)
+	if m == nil {
+		return nil, nil, nil
+	}
+	trusted = []string{"127.0.0.0/8", "::1/128"}
+	for _, s := range luaStrRe.FindAllStringSubmatch(luaComRe.ReplaceAllString(string(m[1]), ""), -1) {
+		v := s[1] + s[2]
+		p, err := netip.ParsePrefix(v)
+		if a, aerr := netip.ParseAddr(v); aerr == nil {
+			p, err = netip.PrefixFrom(a, a.BitLen()), nil
+		}
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("%s: skipping invalid trusted entry %q", path, v))
+		} else if !slices.Contains(trusted, p.String()) {
+			trusted = append(trusted, p.String())
+		}
+	}
+	return trusted, warnings, nil
 }
 
 // adoptOOTB extracts the secrets and the node-specific settings (listen addresses, web
-// listener + ACL, DoH/DoT certificates, DoH path) from a dnsdist_ootb config. ACL, upstreams and
-// blocking come from the profile.
+// listener + ACL, DoH/DoT certificates, DoH path, abuse.lua's trusted table) from a
+// dnsdist_ootb config. ACL, upstreams and the rest of blocking come from the profile;
+// response-IP blocking stays off, as on the old server.
 func adoptOOTB(path string) (adoption, error) {
 	y, err := parseOOTB(path)
 	if err != nil {
@@ -137,7 +176,15 @@ func adoptOOTB(path string) (adoption, error) {
 	if cert != "" && key != "" {
 		lst["tls"] = map[string]any{"cert_file": cert, "key_file": key}
 	}
-	a.Overrides = map[string]any{"listen": lst}
+	a.Overrides = map[string]any{"listen": lst, "blocking": map[string]any{"block_response_ips": false}}
+	trusted, warn, err := parseTrusted(filepath.Join(filepath.Dir(path), "abuse.lua"))
+	switch {
+	case trusted != nil:
+		a.Overrides["abuse"] = map[string]any{"trusted": trusted}
+	case err != nil && !os.IsNotExist(err):
+		warn = append(warn, fmt.Sprintf("abuse.lua: %v", err))
+	}
+	a.Warnings = warn
 	if ap, err := netip.ParseAddrPort(y["admin.web.ip4"] + ":" + y["admin.web.port"]); err == nil {
 		web := map[string]any{"listen": ap.String()}
 		if acl := splitList(y["admin.web.acl"]); len(acl) > 0 {

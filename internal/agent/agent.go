@@ -81,6 +81,9 @@ func Enroll(ctx context.Context, o Options, panelURL, token, name string, adopt 
 		if ad, err = adoptOOTB(o.path(OOTBConfig)); err != nil {
 			return fmt.Errorf("enroll --adopt: %w", err)
 		}
+		for _, w := range ad.Warnings {
+			o.Log.Warn(w)
+		}
 		if strings.HasPrefix(ad.Secrets.WebAPIKey, "$") {
 			o.Log.Warn("admin.web.apikey is hashed: the agent cannot read dnsdist stats with it; set a plain key")
 		}

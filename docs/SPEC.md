@@ -154,6 +154,8 @@ The full initial schema is `migrations/0001_init.up.sql`. Summary:
 * `offender_events(id bigserial, node_id, client inet/cidr text, stage 'warning'|'blocked', reason, first_seen, last_seen, blocks bigint)` — unique open event per (node, client, reason) until 10 min unseen.
 * `audit_log(id bigserial, at, user_id, action, target_type, target_id, details jsonb, ip)`
 * `settings(key text pk, value jsonb)` — panel-wide settings (builder schedule, retention, public URL).
+* `ingested_batches(node_id, batch_key, at, pk(node_id,batch_key))` — `0005`: committed
+  agent batch keys (§8 Idempotency-Key), pruned after 7 days by the hourly retention job.
 
 ---
 
@@ -185,7 +187,7 @@ panel on save and in the agent before rendering.
     "txt": "BLOCKED. UU No 19, pasal 40 (2a dan 2b). Permen Kominfo No 5 2020",
     "soa": "blocked.invalid. nobody.blocked.invalid. 1 3600 1200 604800 10800",
     "ns": "ns.blocked.invalid",
-    "block_response_ips": true,     // rewrite A answers whose IP is in the IP list
+    "block_response_ips": false,    // opt-in: rewrite A answers whose IP is in the IP list (§6.4)
     "log_blocked": true             // dnstap → agent → blocked_daily
   },
   "abuse": {
@@ -276,8 +278,10 @@ Rendering rules (must be byte-for-byte deterministic for the same input):
      `dnsjos-response-ip-blocked`, log it, and mark it `SetSkipCacheResponseAction()` so
      every blocked answer is counted/logged and CDB updates apply immediately. Only A
      answers are checked (the IP list is IPv4-only). This is a behaviour change from the
-     legacy production rules, whose IP match never altered answers: adoption must keep it
-     off unless the operator opts in.
+     legacy production rules, whose IP match never altered answers, so it is **off by
+     default** (`DefaultConfigSpec`, the web profile defaults) and adoption sends
+     `blocking.block_response_ips: false` explicitly in its node overrides. Profiles
+     stored with `true` keep it.
    * Every rule gets its own selector object (dnsdist counts hits on the selector, so a
      shared `TagRule` inflates every rule that uses it).
 10. Abuse (abuse.lua): `MaxQPSIPRule(per_client_qps, 32, 64, burst)` → `DropAction()`
@@ -358,9 +362,16 @@ All agent requests carry `Authorization: Bearer <node_token>` and
 | `GET /agent/v1/config` (`If-None-Match: "<version>"`) | 304 or `api.AgentConfig{version, spec (effective, merged), profile, blocklist{sha256,size,url}, poll_interval_s, heartbeat_interval_s}`; 404 `no_config` (profile has nothing published); 409 `invalid_config` (overrides no longer valid); 409 `no_blocklist` (adopted node, see §17) |
 | `GET /agent/v1/blocklist` | CDB stream (see §7.4) |
 | `POST /agent/v1/heartbeat` | `api.Heartbeat` → `api.HeartbeatAck{config_version, blocklist_sha256, commands[]}` |
-| `POST /agent/v1/blocked` | `api.BlockedBatch{items:[{day, qname, qtype, count}]}` → 204 |
-| `POST /agent/v1/analytics` | `api.AnalyticsBatch` (§19; body ≤ `api.AnalyticsMaxBody` = 10 MiB, checked by `AnalyticsBatch.Validate` → 422 `invalid_batch`) → 204 |
+| `POST /agent/v1/blocked` | `api.BlockedBatch{items:[{day, qname, qtype, count}]}` → 204 (Idempotency-Key, below) |
+| `POST /agent/v1/analytics` | `api.AnalyticsBatch` (§19; body ≤ `api.AnalyticsMaxBody` = 10 MiB, checked by `AnalyticsBatch.Validate` → 422 `invalid_batch`) → 204 (Idempotency-Key, below) |
 | `POST /agent/v1/cgk` | `api.CGKReport{measured_at, aliases[], rewrite_ranges[], pools:[{net, colos[]}], ok bool, message}` → 204 |
+
+**Idempotency.** Agents send `Idempotency-Key: <batch key>` (`api.IdempotencyHeader`, ≤ 255
+bytes, else 400) on `/blocked` and `/analytics`; the key is the same on every retry and
+spool replay of a batch. The panel inserts `(node_id, key)` into `ingested_batches` in the
+same transaction as the batch's upserts (`ON CONFLICT DO NOTHING`); when the key already
+exists the batch is skipped and still answered 204. Without the header the batch is stored
+as before.
 
 `api.Heartbeat`:
 ```jsonc
@@ -498,6 +509,9 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET /api/v1/audit?limit&before` | admin only: `List[AuditEntry]`, newest first, `before` = audit id cursor |
 | `GET/PUT /api/v1/settings` | `Settings` · PUT decodes over current values (partial body ok) → `Settings` |
 | `GET /healthz` · `GET /readyz` (DB ping) | health |
+| `GET /api/v1/branding` | public: `Branding{name, tagline, assets}` — `assets` has every `api.BrandingAssets` key (`login_logo`, `navbar_light`, `navbar_dark`, `login_bg`, `login_bg_mobile`, `cloud`, `favicon_ico`, `icon_192`, `icon_512`, `apple_touch`), each `/branding/<file>?v=<mtime>` or `null` when the file is absent (§15) |
+| `GET /branding/{file}` | public: a file from `DNSJOS_BRAND_DIR`, only the names in `api.BrandingFiles` (correct `Content-Type`, `Cache-Control: public, max-age=86400`); anything else 404 |
+| `GET /favicon.ico` · `GET /manifest.webmanifest` | public: the brand `favicon.ico`, else a neutral built-in icon · web manifest with the brand name and `icon-192/512.png` (else `/favicon.ico`) |
 
 Every mutating admin action writes `audit_log`.
 
@@ -556,6 +570,7 @@ from a file kept outside git.
   cloudflareresearch.com, acme-v02.api.letsencrypt.org, engage.cloudflareclient.com,
   time.cloudflare.com, imap.hostinger.com, smtp.hostinger.com, help.stockbit.com,
   chat.riotgames.com, gitlab.com.
+* Blocking: `block_response_ips` off (opt-in, see §6.4).
 * Tuning: UDP buffers 16 MB.
 
 ---
@@ -597,6 +612,9 @@ Never touches an existing `/etc/dnsdist` without backing it up first.
 | `DNSJOS_PUBLIC_URL` | `http://127.0.0.1:8080` (used in install commands) |
 | `DNSJOS_SECURE_COOKIES` | `auto` (true when PUBLIC_URL is https) |
 | `DNSJOS_LOG_LEVEL` | `info` |
+| `DNSJOS_BRAND_NAME` | `DnsJos` (UI name; also the SPA `<title>`, set server-side) |
+| `DNSJOS_BRAND_TAGLINE` | empty |
+| `DNSJOS_BRAND_DIR` | `$DNSJOS_DATA_DIR/branding` — operator-provided images (§10 `/branding/{file}`); the repository ships none |
 
 ---
 
@@ -746,19 +764,37 @@ Types live in `internal/shared/api/analytics.go`.
   `nxdomain` (raw qname of NXDOMAIN answers), `servfail` (raw qname of SERVFAIL answers);
   plus exact counters by qtype (`"A"`, `"AAAA"`, …, `TYPEn` when unknown) and rcode
   (`"NOERROR"`, `"NXDOMAIN"`, `"SERVFAIL"`, …), and total responses. Every 60 s the agent
-  POSTs the window's delta to `POST /agent/v1/analytics` and resets it; unsent batches
+  POSTs a batch to `POST /agent/v1/analytics` (with an Idempotency-Key, §8); unsent batches
   spool to disk like §9.4:
   ```jsonc
   {"day": "2026-01-02", "total": 0, "sample_rate": 1,
    "by_qtype": {"A": 0}, "by_rcode": {"NOERROR": 0},
-   "tops": {"queried": [{"name": "example.com", "count": 0, "error": 0}]}}  // error = Space-Saving over-estimate bound
+   "epoch": "3f9c…", "tops_mode": "cumulative",
+   "tops": {"queried": [{"name": "example.com", "count": 0, "error": 0}]},  // error = Space-Saving over-estimate bound
+   "evicted": {"queried": ["gone.example"]}}
   ```
-  Names are lower-case without the trailing dot.
+  Names are lower-case without the trailing dot. `total`, `by_qtype` and `by_rcode` are
+  always deltas since the previous batch. **Tops protocol v2** (`tops_mode`):
+  * `"delta"` (or absent, legacy agents): the window's own sketch; items are added.
+  * `"cumulative"`: the agent keeps ONE sketch per day across flushes; `epoch` (required,
+    ≤ 64 bytes) is random per sketch lifetime (new on agent start and day rollover). Each
+    item carries the name's **cumulative** count/error within the epoch; only items whose
+    (count, error) changed since last sent are sent, plus `evicted[kind]` = names sent
+    earlier in this epoch that have since left the sketch. `evicted` is rejected in delta mode.
+* **Panel storage** (`migrations/0004_analytics`, `0005`): `analytics_daily_totals(day, node_id,
 * **Panel storage** (`migrations/0004_analytics`): `analytics_daily_totals(day, node_id,
   total, by_qtype jsonb, by_rcode jsonb, sampled, pk(day,node_id))` (upsert-add; jsonb maps
   summed per key; `sampled` ORed from `sample_rate > 1`) and `analytics_top_daily(day,
-  node_id, kind, name, count, error, pk(day,node_id,kind,name))` (upsert-add count and
-  error), index `(day, kind, count desc)`. A daily job trims each (day, node, kind) to the
+  node_id, kind, name, count, error, epoch, base, base_error, pk(day,node_id,kind,name))`,
+  index `(day, kind, count desc)`. A name's value is `base + count` (error
+  `base_error + error`) — reports, trim and CSV all use it. Delta batches add to
+  count/error. Cumulative items: when the row's `epoch` differs from the batch's, fold
+  (`base += count`, `base_error += error`) and take the batch epoch; then `count`/`error`
+  := the item's. Evicted names: fold likewise, then `count = error = 0`; a row left with
+  `base = 0` and `count = 0` is deleted. Evictions apply before the batch's items. Rows
+  stay ~bounded by `top_k` per (day, node, kind, epoch). An epoch's batches must arrive in
+  order (the spool replays in order); a stale batch of an older epoch arriving after a
+  newer one would be folded twice. A daily job trims each (day, node, kind) to the
   node's top 1000 plus any name in the fleet's top 1000 for that (day, kind) once the
   day is over. Retention: setting `analytics_retention_days` (default
   400, in `api.Settings`).

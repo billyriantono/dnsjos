@@ -33,7 +33,7 @@ export const defaultSpec = (): ConfigSpec => ({
     txt: 'BLOCKED. UU No 19, pasal 40 (2a dan 2b). Permen Kominfo No 5 2020',
     soa: 'blocked.invalid. nobody.blocked.invalid. 1 3600 1200 604800 10800',
     ns: 'ns.blocked.invalid',
-    block_response_ips: true,
+    block_response_ips: false, // opt-in: rewrites answers, unlike the legacy rules
     log_blocked: true,
   },
   abuse: {

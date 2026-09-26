@@ -99,7 +99,7 @@ func (s *svc) build(r *http.Request, f filter) (api.AnalyticsReport, error) {
 		base = rep.ByRcode["SERVFAIL"]
 	}
 	rows, _ = s.d.Pool.Query(ctx, `
-		SELECT t.name, sum(t.count)::bigint AS c, bool_or(t.error > 0 OR coalesce(d.sampled, false))
+		SELECT t.name, sum(t.base + t.count)::bigint AS c, bool_or(t.error > 0 OR t.base_error > 0 OR coalesce(d.sampled, false))
 		FROM analytics_top_daily t
 		LEFT JOIN analytics_daily_totals d ON d.day = t.day AND d.node_id = t.node_id
 		WHERE t.day BETWEEN $1::date AND $2::date AND ($3 = '' OR t.node_id = nullif($3, '')::uuid) AND t.kind = $4

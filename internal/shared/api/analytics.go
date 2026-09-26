@@ -62,7 +62,23 @@ type AnalyticsBatch struct {
 	ByRcode    map[string]int64              `json:"by_rcode"` // "NOERROR", "NXDOMAIN", "SERVFAIL", …
 	SampleRate int                           `json:"sample_rate"`
 	Tops       map[string][]AnalyticsTopItem `json:"tops"` // kind → items
+	// Tops protocol v2: in TopsMode "cumulative" every item carries its count/error
+	// within Epoch (random per agent sketch lifetime); Evicted lists names that left
+	// the sketch. "" or "delta" = legacy additive items.
+	Epoch    string              `json:"epoch,omitempty"`
+	TopsMode string              `json:"tops_mode,omitempty"`
+	Evicted  map[string][]string `json:"evicted,omitempty"` // kind → names
 }
+
+// AnalyticsBatch.TopsMode values.
+const (
+	AnalyticsTopsDelta      = "delta"
+	AnalyticsTopsCumulative = "cumulative"
+)
+
+// IdempotencyHeader carries an agent batch's key (POST /agent/v1/blocked and
+// /analytics); the same on every retry, so the panel stores each batch at most once.
+const IdempotencyHeader = "Idempotency-Key"
 
 // Validate checks an agent batch before the panel stores it.
 func (b AnalyticsBatch) Validate() error {
@@ -81,6 +97,29 @@ func (b AnalyticsBatch) Validate() error {
 		for k, v := range m {
 			if k == "" || len(k) > 32 || v < 0 {
 				bad("%s: bad entry %q=%d", field, k, v)
+			}
+		}
+	}
+	switch b.TopsMode {
+	case "", AnalyticsTopsDelta:
+		if len(b.Evicted) > 0 {
+			bad("evicted: only with tops_mode %q", AnalyticsTopsCumulative)
+		}
+	case AnalyticsTopsCumulative:
+		if b.Epoch == "" || len(b.Epoch) > 64 {
+			bad("epoch: required with tops_mode %q, at most 64 bytes", AnalyticsTopsCumulative)
+		}
+	default:
+		bad("tops_mode: want %q or %q, got %q", AnalyticsTopsDelta, AnalyticsTopsCumulative, b.TopsMode)
+	}
+	for kind, names := range b.Evicted {
+		if !slices.Contains(AnalyticsKinds, kind) {
+			bad("evicted: unknown kind %q", kind)
+			continue
+		}
+		for i, n := range names {
+			if n == "" || len(n) > 255 {
+				bad("evicted.%s[%d]: bad name %q", kind, i, n)
 			}
 		}
 	}

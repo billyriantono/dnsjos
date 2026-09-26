@@ -256,3 +256,45 @@ func TestBoundedMemory(t *testing.T) {
 		t.Fatalf("total %d", b[0].Total)
 	}
 }
+
+// TestCumulative: tops protocol v2 — one sketch per day across flushes, only changed
+// items are resent with their cumulative count, evicted names are listed, and the
+// epoch is stable within a day and new on rollover.
+func TestCumulative(t *testing.T) {
+	a := &Agg{}
+	a.Configure(1, 2)
+	day := "2026-09-27"
+	a.add(day, "a.example", "A", "NOERROR")
+	a.add(day, "a.example", "A", "NOERROR")
+	a.add(day, "b.example", "A", "NOERROR")
+	b1 := a.Take()
+	if len(b1) != 1 || b1[0].TopsMode != api.AnalyticsTopsCumulative || b1[0].Epoch == "" || b1[0].Total != 3 || b1[0].Validate() != nil {
+		t.Fatalf("first flush %+v", b1)
+	}
+	a.add(day, "a.example", "A", "NOERROR")
+	b2 := a.Take()
+	if len(b2) != 1 || b2[0].Epoch != b1[0].Epoch || b2[0].Total != 1 ||
+		fmt.Sprint(b2[0].Tops[api.AnalyticsQueried]) != "[{a.example 3 0}]" || len(b2[0].Evicted) != 0 {
+		t.Fatalf("second flush sends only the changed name, cumulatively: %+v", b2)
+	}
+	a.add(day, "c.example", "A", "NOERROR") // K = 2: evicts b.example (count 1)
+	b3 := a.Take()
+	if len(b3) != 1 || fmt.Sprint(b3[0].Tops[api.AnalyticsQueried]) != "[{c.example 2 1}]" ||
+		fmt.Sprint(b3[0].Evicted[api.AnalyticsQueried]) != "[b.example]" || b3[0].Validate() != nil {
+		t.Fatalf("eviction %+v", b3)
+	}
+	if b := a.Take(); len(b) != 0 {
+		t.Fatalf("nothing changed: %+v", b)
+	}
+	a.add("2026-09-28", "a.example", "A", "NOERROR")
+	b4 := a.Take()
+	if len(b4) != 1 || b4[0].Day != "2026-09-28" || b4[0].Epoch == b1[0].Epoch ||
+		fmt.Sprint(b4[0].Tops[api.AnalyticsQueried]) != "[{a.example 1 0}]" {
+		t.Fatalf("rollover %+v", b4)
+	}
+	a.Configure(1, 3) // new sketch size: new epoch
+	a.add("2026-09-28", "a.example", "A", "NOERROR")
+	if b := a.Take(); len(b) != 1 || b[0].Epoch == b4[0].Epoch || fmt.Sprint(b[0].Tops[api.AnalyticsQueried]) != "[{a.example 1 0}]" {
+		t.Fatalf("top_k change %+v", b)
+	}
+}

@@ -1,23 +1,29 @@
 package server
 
 import (
+	"html"
 	"io/fs"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
 	"github.com/billyriantono/dnsjos/webdist"
 )
 
+var titleRE = regexp.MustCompile(`(?is)<title>.*?</title>`)
+
 // spaHandler serves the embedded SPA: real files as-is (hashed /assets/* cached
-// forever), any other GET path gets index.html so client-side routes work.
-func spaHandler() http.HandlerFunc {
+// forever), any other GET path gets index.html so client-side routes work. index.html
+// gets <title> set to the brand name, so the tab is right before any JS runs.
+func spaHandler(title string) http.HandlerFunc {
 	dist := webdist.FS
 	index, err := fs.ReadFile(dist, "index.html")
 	if err != nil {
 		panic("webdist: index.html missing: " + err.Error())
 	}
+	index = titleRE.ReplaceAllLiteral(index, []byte("<title>"+html.EscapeString(title)+"</title>"))
 	return func(w http.ResponseWriter, r *http.Request) {
 		p := r.URL.Path
 		if strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/agent/") {

@@ -81,6 +81,7 @@ func TestLiveBlocking(t *testing.T) {
 	spec.Webserver.Listen = web
 	spec.Upstreams.Servers = []api.Upstream{{Address: pc.LocalAddr().String(), Weight: 1, Order: 1, Sockets: 1}}
 	spec.Abuse.Enabled, spec.CGK.Enabled, spec.Blocking.LogBlocked = false, false, false
+	spec.Blocking.BlockResponseIPs = true                                // opt-in since it became off by default
 	spec.Analytics.StreamAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t)) // nobody listens; fine
 	rt := testRT
 	rt.BaseDir, rt.CDBPath = dir, cdbPath

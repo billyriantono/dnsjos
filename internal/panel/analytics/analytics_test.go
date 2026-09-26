@@ -39,6 +39,12 @@ func setup(t *testing.T) (*svc, *pgxpool.Pool, string, string) {
 // post sends a batch as nodeID through a real Agent route.
 func post(t *testing.T, s *svc, nodeID string, b any) *httptest.ResponseRecorder {
 	t.Helper()
+	return postKey(t, s, nodeID, "", b)
+}
+
+// postKey is post with an Idempotency-Key ("" = none).
+func postKey(t *testing.T, s *svc, nodeID, key string, b any) *httptest.ResponseRecorder {
+	t.Helper()
 	body, _ := json.Marshal(b)
 	rt := app.NewRouter(s.d)
 	tok := app.NewToken()
@@ -48,6 +54,9 @@ func post(t *testing.T, s *svc, nodeID string, b any) *httptest.ResponseRecorder
 	rt.Agent("POST /agent/v1/analytics", s.ingest)
 	req := httptest.NewRequest("POST", "/agent/v1/analytics", bytes.NewReader(body))
 	req.Header.Set("Authorization", "Bearer "+tok)
+	if key != "" {
+		req.Header.Set(api.IdempotencyHeader, key)
+	}
 	rec := httptest.NewRecorder()
 	rt.ServeHTTP(rec, req)
 	return rec
@@ -139,6 +148,81 @@ func TestIngestAddsUp(t *testing.T) {
 	pool.QueryRow(context.Background(), "SELECT count(*) FROM analytics_daily_totals WHERE day < '2002-01-01'").Scan(&n)
 	if n != 0 {
 		t.Fatal("old day stored")
+	}
+}
+
+func TestIngestIdempotent(t *testing.T) {
+	s, _, a, b := setup(t)
+	for _, node := range []string{a, a, b} { // the key is per node
+		if rec := postKey(t, s, node, "k1", batch(today, 1)); rec.Code != 204 {
+			t.Fatalf("ingest: %d %s", rec.Code, rec.Body)
+		}
+	}
+	r := report(t, s, "node_id="+a)
+	if r.Total != 100 || r.Top[0].Count != 60 {
+		t.Fatalf("replay counted: total %d top %+v", r.Total, r.Top)
+	}
+	if r = report(t, s, "node_id="+b); r.Total != 100 {
+		t.Fatalf("node b: %d", r.Total)
+	}
+}
+
+func TestIngestCumulative(t *testing.T) {
+	s, pool, a, _ := setup(t)
+	send := func(epoch string, items []api.AnalyticsTopItem, evicted ...string) {
+		t.Helper()
+		b := api.AnalyticsBatch{Day: today, SampleRate: 1, TopsMode: api.AnalyticsTopsCumulative, Epoch: epoch,
+			Tops: map[string][]api.AnalyticsTopItem{"queried": items}}
+		if len(evicted) > 0 {
+			b.Evicted = map[string][]string{"queried": evicted}
+		}
+		if rec := post(t, s, a, b); rec.Code != 204 {
+			t.Fatalf("ingest: %d %s", rec.Code, rec.Body)
+		}
+	}
+	top := func() map[string]int64 {
+		t.Helper()
+		m := map[string]int64{}
+		for _, e := range report(t, s, "node_id="+a).Top {
+			m[e.Name] = e.Count
+		}
+		return m
+	}
+	check := func(want map[string]int64) {
+		t.Helper()
+		if got := top(); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Fatalf("top = %v, want %v", got, want)
+		}
+	}
+	// A legacy delta row is folded into base by the first cumulative batch.
+	if rec := post(t, s, a, api.AnalyticsBatch{Day: today, SampleRate: 1,
+		Tops: map[string][]api.AnalyticsTopItem{"queried": {{Name: "z.example", Count: 7}}}}); rec.Code != 204 {
+		t.Fatal(rec.Code)
+	}
+	send("e1", []api.AnalyticsTopItem{{Name: "x.example", Count: 10}, {Name: "y.example", Count: 5}, {Name: "z.example", Count: 3}})
+	check(map[string]int64{"x.example": 10, "y.example": 5, "z.example": 10})
+	send("e1", []api.AnalyticsTopItem{{Name: "x.example", Count: 25}}) // cumulative, not added
+	check(map[string]int64{"x.example": 25, "y.example": 5, "z.example": 10})
+	send("e1", []api.AnalyticsTopItem{{Name: "x.example", Count: 30}}, "y.example") // y only ever in e1: row dropped
+	check(map[string]int64{"x.example": 30, "z.example": 10})
+	send("e2", []api.AnalyticsTopItem{{Name: "x.example", Count: 4, Error: 1}}) // agent restart: new epoch
+	check(map[string]int64{"x.example": 34, "z.example": 10})
+	send("e2", nil, "x.example", "z.example") // evicted: earlier epochs stay
+	check(map[string]int64{"x.example": 30, "z.example": 10})
+	send("e2", []api.AnalyticsTopItem{{Name: "x.example", Count: 2, Error: 2}}, "x.example") // evicted and re-added
+	check(map[string]int64{"x.example": 32, "z.example": 10})
+	var rows int
+	pool.QueryRow(context.Background(), "SELECT count(*) FROM analytics_top_daily WHERE node_id = $1", a).Scan(&rows)
+	if rows != 2 {
+		t.Fatalf("rows = %d", rows)
+	}
+	if e := report(t, s, "node_id="+a).Top[0]; !e.Approximate {
+		t.Fatalf("error in the current epoch must mark approximate: %+v", e)
+	}
+	// A later epoch without error keeps the folded base_error.
+	send("e3", []api.AnalyticsTopItem{{Name: "x.example", Count: 1}})
+	if e := report(t, s, "node_id="+a).Top[0]; e.Count != 33 || !e.Approximate {
+		t.Fatalf("after fold: %+v", e)
 	}
 }
 

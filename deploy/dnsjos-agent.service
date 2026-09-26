@@ -9,6 +9,10 @@ Type=simple
 ExecStart=/usr/local/bin/dnsjos-agent run
 Restart=always
 RestartSec=5
+# SIGTERM the agent only: it waits for a running apt/dpkg upgrade or dnsdist restart
+# before exiting, so give it time instead of killing dpkg mid-way.
+KillMode=mixed
+TimeoutStopSec=15min
 StateDirectory=dnsjos
 StateDirectoryMode=0700
 

@@ -19,6 +19,7 @@ func (s *svc) retention(ctx context.Context) error {
 			[]any{set.MetricsRetentionDays}, set.MetricsRetentionDays > 0},
 		{"blocked_daily", "DELETE FROM blocked_daily WHERE day < current_date - $1::int",
 			[]any{set.BlockedRetentionDays}, set.BlockedRetentionDays > 0},
+		{"ingested_batches", "DELETE FROM ingested_batches WHERE at < now() - interval '7 days'", nil, true},
 		{"offender_events", "DELETE FROM offender_events WHERE closed AND last_seen < now() - interval '90 days'", nil, true},
 		{"cgk_reports", `DELETE FROM cgk_reports WHERE id IN (
 			SELECT id FROM (SELECT id, row_number() OVER (PARTITION BY node_id ORDER BY measured_at DESC, id DESC) AS rn

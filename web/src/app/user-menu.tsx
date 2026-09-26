@@ -17,9 +17,10 @@ import {
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { useChangePassword, useLogout } from '@/lib/api/client'
+import { cn } from '@/lib/utils'
 import { useAuth } from './auth'
 
-export function UserMenu() {
+export function UserMenu({ className }: { className?: string }) {
   const { user } = useAuth()
   const logout = useLogout()
   const navigate = useNavigate()
@@ -31,9 +32,9 @@ export function UserMenu() {
     <>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
-          <Button variant="ghost" size="icon" className="rounded-full" aria-label="Account">
+          <Button variant="ghost" size="icon" className={cn('rounded-full', className)} aria-label="Account">
             <Avatar className="size-8">
-              <AvatarFallback className="bg-primary/15 text-xs font-semibold text-primary">{initials}</AvatarFallback>
+              <AvatarFallback className="bg-brand-gold text-xs font-semibold text-sidebar-primary-foreground">{initials}</AvatarFallback>
             </Avatar>
           </Button>
         </DropdownMenuTrigger>

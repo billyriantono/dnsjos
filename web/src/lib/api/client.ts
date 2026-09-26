@@ -6,6 +6,7 @@ import type {
   AuditEntry,
   AuditQuery,
   BlockedReport,
+  Branding,
   BlockedReportQuery,
   BlocklistBuild,
   BlocklistLookup,
@@ -193,6 +194,7 @@ export const api = {
     action: (id: number, action: UpgradeAction) => post<UpgradeRun>(`${V1}/upgrades/${id}/${action}`),
   },
   meta: () => get<Meta>(`${V1}/meta`),
+  branding: () => get<Branding>(`${V1}/branding`),
   overview: {
     get: () => get<Overview>(`${V1}/overview`),
     metrics: (q: MetricsQuery = {}) => get<MetricSeries>(`${V1}/overview/metrics${qs({ ...q })}`),
@@ -215,6 +217,7 @@ export const qk = {
   upgrades: ['upgrades'] as const,
   upgrade: (id: number) => ['upgrades', id] as const,
   meta: ['meta'] as const,
+  branding: ['branding'] as const,
   enrollment: ['enrollment-tokens'] as const,
   profiles: ['profiles'] as const,
   profile: (id: string) => ['profiles', id] as const,
@@ -274,6 +277,8 @@ export const useUpgrade = (id: number) =>
     refetchInterval: (q) => (q.state.data?.status === 'running' ? 3_000 : false),
   })
 export const useMeta = () => useQuery({ queryKey: qk.meta, queryFn: api.meta, staleTime: Infinity })
+/** Public runtime branding (works signed out); fixed for the page's lifetime. */
+export const useBranding = () => useQuery({ queryKey: qk.branding, queryFn: api.branding, staleTime: Infinity })
 export const useEnrollmentTokens = () => useQuery({ queryKey: qk.enrollment, queryFn: api.enrollment.list })
 export const useProfiles = () => useQuery({ queryKey: qk.profiles, queryFn: api.profiles.list })
 export const useProfile = (id: string) => useQuery({ queryKey: qk.profile(id), queryFn: () => api.profiles.get(id) })

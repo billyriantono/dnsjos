@@ -462,6 +462,15 @@ func TestBlockedAndCGK(t *testing.T) {
 	if rows != 2 || a != 10 {
 		t.Fatalf("blocked_daily rows %d, A count %d", rows, a)
 	}
+	// Idempotency-Key: a replayed batch is stored once.
+	for range 2 {
+		e.call(204, "POST", "/agent/v1/blocked", er.NodeToken, batch, nil, api.IdempotencyHeader, "spool-1")
+	}
+	e.scalar("SELECT count FROM blocked_daily WHERE qname = 'bad.example' AND qtype = 'A'", &a)
+	if a != 15 {
+		t.Fatalf("replayed batch counted twice: %d", a)
+	}
+	e.call(400, "POST", "/agent/v1/blocked", er.NodeToken, batch, nil, api.IdempotencyHeader, strings.Repeat("k", 256))
 	e.call(204, "POST", "/agent/v1/blocked", er.NodeToken, api.BlockedBatch{}, nil)
 	e.call(400, "POST", "/agent/v1/blocked", er.NodeToken, "garbage", nil)
 
