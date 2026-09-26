@@ -86,8 +86,9 @@ func Current(ctx context.Context, q db.Querier) (*api.BlocklistBuild, error) {
 }
 
 // Start runs a build in the background and returns its running row; errBusy when
-// a build is already in progress.
-func (s *Service) Start(trigger string) (api.BlocklistBuild, error) {
+// a build is already in progress. force re-downloads every URL source (no
+// conditional request) and rebuilds even when the inputs are unchanged.
+func (s *Service) Start(trigger string, force bool) (api.BlocklistBuild, error) {
 	if !s.mu.TryLock() {
 		return api.BlocklistBuild{}, errBusy
 	}
@@ -100,7 +101,7 @@ func (s *Service) Start(trigger string) (api.BlocklistBuild, error) {
 		defer s.mu.Unlock()
 		ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
 		defer cancel()
-		if _, err := s.execute(ctx, b.ID); err != nil {
+		if _, err := s.execute(ctx, b.ID, force); err != nil {
 			s.d.Log.Error("blocklist build", "id", b.ID, "err", err)
 		}
 	}()
@@ -125,7 +126,7 @@ func (s *Service) tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.execute(ctx, b.ID)
+	_, err = s.execute(ctx, b.ID, false)
 	return err
 }
 
@@ -144,8 +145,8 @@ type result struct {
 }
 
 // execute runs build and records its outcome on row id. Caller holds s.mu.
-func (s *Service) execute(ctx context.Context, id int64) (api.BlocklistBuild, error) {
-	res, buildErr := s.build(ctx)
+func (s *Service) execute(ctx context.Context, id int64, force bool) (api.BlocklistBuild, error) {
+	res, buildErr := s.build(ctx, force)
 	status, msg := res.status, ""
 	if buildErr != nil {
 		status, msg = "failed", buildErr.Error()
@@ -175,7 +176,7 @@ func (s *Service) execute(ctx context.Context, id int64) (api.BlocklistBuild, er
 	return b, buildErr
 }
 
-func (s *Service) build(ctx context.Context) (res result, err error) {
+func (s *Service) build(ctx context.Context, force bool) (res result, err error) {
 	if err := os.MkdirAll(filepath.Join(s.dir, "sources"), 0o755); err != nil {
 		return res, err
 	}
@@ -198,7 +199,7 @@ func (s *Service) build(ctx context.Context) (res result, err error) {
 		if !isURLKind(src.Kind) {
 			continue
 		}
-		changed, ferr := s.fetch(ctx, src)
+		changed, ferr := s.fetch(ctx, src, force)
 		if ferr != nil {
 			s.d.Log.Warn("blocklist fetch", "source", src.ID, "url", src.URL, "err", ferr)
 		} else if changed {
@@ -214,7 +215,7 @@ func (s *Service) build(ctx context.Context) (res result, err error) {
 		return res, err
 	} else if cur != nil {
 		old, _ := os.ReadFile(filepath.Join(s.dir, "inputs.fp"))
-		if _, err := os.Stat(s.artifact(cur.SHA256)); err == nil && string(old) == res.fingerprint {
+		if _, err := os.Stat(s.artifact(cur.SHA256)); err == nil && string(old) == res.fingerprint && !force {
 			res.status = "skipped"
 			return res, nil
 		}
@@ -359,15 +360,21 @@ func writeCDB(ctx context.Context, f *os.File, inputs []input, wl map[string]str
 }
 
 // fetch downloads a URL source to its raw file. changed=false on 304 (the previous
-// download stays and is still built from).
-func (s *Service) fetch(ctx context.Context, src source) (changed bool, err error) {
+// download stays and is still built from). force skips the conditional request.
+// The status records size, time and throughput so download speed can be compared.
+func (s *Service) fetch(ctx context.Context, src source, force bool) (changed bool, err error) {
 	path := s.sourcePath(src.ID)
+	start := time.Now()
+	var n int64
 	defer func() {
-		status := "not modified"
+		took := time.Since(start)
+		status := fmt.Sprintf("not modified (%d ms)", took.Milliseconds())
 		if err != nil {
 			status = "error: " + err.Error()
 		} else if changed {
-			status = "ok"
+			mbps := float64(n) / 1e6 / took.Seconds()
+			status = fmt.Sprintf("ok: %.1f MB in %.1f s (%.1f MB/s, 1 stream)", float64(n)/1e6, took.Seconds(), mbps)
+			s.d.Log.Info("blocklist fetch", "source", src.ID, "bytes", n, "seconds", took.Seconds(), "mb_per_s", mbps, "streams", 1)
 		}
 		_, _ = s.d.Pool.Exec(context.WithoutCancel(ctx),
 			"UPDATE blocklist_sources SET last_fetch_at = now(), last_status = $2 WHERE id = $1", src.ID, status)
@@ -381,7 +388,7 @@ func (s *Service) fetch(ctx context.Context, src source) (changed bool, err erro
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
 	_, statErr := os.Stat(path)
 	haveFile := statErr == nil
-	if haveFile { // conditional only when we still hold the copy a 304 refers to
+	if haveFile && !force { // conditional only when we still hold the copy a 304 refers to
 		if src.ETag != "" {
 			req.Header.Set("If-None-Match", src.ETag)
 		}
@@ -405,7 +412,7 @@ func (s *Service) fetch(ctx context.Context, src source) (changed bool, err erro
 	if err != nil {
 		return false, err
 	}
-	_, err = io.Copy(out, resp.Body)
+	n, err = io.Copy(out, resp.Body)
 	if err == nil {
 		err = out.Sync()
 	}

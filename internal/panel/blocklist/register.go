@@ -183,7 +183,8 @@ func (s *Service) listBuilds(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Service) startBuild(w http.ResponseWriter, r *http.Request) {
-	b, err := s.Start("manual")
+	force := r.URL.Query().Get("force") == "true"
+	b, err := s.Start("manual", force)
 	if errors.Is(err, errBusy) {
 		httpx.WriteError(w, http.StatusConflict, "conflict", err.Error())
 		return
@@ -191,7 +192,7 @@ func (s *Service) startBuild(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteDBError(w, r, err)
 		return
 	}
-	_ = audit.Record(r, s.d.Pool, "blocklist.build", "blocklist_build", strconv.FormatInt(b.ID, 10), nil)
+	_ = audit.Record(r, s.d.Pool, "blocklist.build", "blocklist_build", strconv.FormatInt(b.ID, 10), map[string]bool{"force": force})
 	httpx.WriteJSON(w, http.StatusAccepted, b)
 }
 

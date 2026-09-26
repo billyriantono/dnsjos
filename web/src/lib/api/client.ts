@@ -163,7 +163,7 @@ export const api = {
     updateSource: (id: string, s: BlocklistSourcePatch) => patch<BlocklistSource>(`${V1}/blocklist/sources/${id}`, s),
     removeSource: (id: string) => del(`${V1}/blocklist/sources/${id}`),
     builds: () => get<List<BlocklistBuild>>(`${V1}/blocklist/builds`),
-    build: () => post<BlocklistBuild>(`${V1}/blocklist/builds`),
+    build: (force = false) => post<BlocklistBuild>(`${V1}/blocklist/builds${force ? '?force=true' : ''}`),
     current: () => get<BlocklistBuild | null>(`${V1}/blocklist/current`),
     lookup: (name: string) => get<BlocklistLookup>(`${V1}/blocklist/lookup?name=${enc(name)}`),
   },
@@ -380,7 +380,12 @@ export const useUpdateSource = () =>
   )
 export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [qk.blocklistSources])
 export const useBuildNow = () =>
-  useMut(() => api.blocklist.build(), () => [qk.blocklistBuilds, qk.blocklistCurrent, qk.overview])
+  useMut((force: boolean = false) => api.blocklist.build(force), () => [
+    qk.blocklistBuilds,
+    qk.blocklistCurrent,
+    qk.blocklistSources,
+    qk.overview,
+  ])
 
 export const useCreateUser = () => useMut(api.users.create, () => [qk.users])
 export const useUpdateUser = () =>

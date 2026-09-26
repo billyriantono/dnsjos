@@ -1,6 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState, type FormEvent, type ReactNode } from 'react'
-import { LuHammer, LuPencil, LuPlus, LuSearch, LuShieldBan, LuShieldCheck, LuTrash2 } from 'react-icons/lu'
+import { LuHammer,
+  LuRefreshCw, LuPencil, LuPlus, LuSearch, LuShieldBan, LuShieldCheck, LuTrash2 } from 'react-icons/lu'
 import { toast } from 'sonner'
 
 import { RequireAdmin, useAuth } from '@/app/auth'
@@ -84,18 +85,34 @@ export default function BlocklistPage() {
         description="TrustPositif and custom lists, built once into a CDB file that every node downloads."
         actions={
           <RequireAdmin>
-            <Button
-              disabled={busy}
-              onClick={() =>
-                buildNow.mutate(undefined, {
-                  onSuccess: (b) => toast.success(`Build #${b.id} started`),
-                  onError: toastError,
-                })
-              }
-            >
-              <LuHammer className={busy ? 'animate-pulse' : undefined} />
-              {busy ? 'Building…' : 'Build now'}
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                disabled={busy}
+                title="Ignore cached copies: download every source again and rebuild (useful to measure download speed)"
+                onClick={() =>
+                  buildNow.mutate(true, {
+                    onSuccess: (b) => toast.success(`Forced build #${b.id} started (full re-download)`),
+                    onError: toastError,
+                  })
+                }
+              >
+                <LuRefreshCw className={busy ? 'animate-spin' : undefined} />
+                Force re-download
+              </Button>
+              <Button
+                disabled={busy}
+                onClick={() =>
+                  buildNow.mutate(false, {
+                    onSuccess: (b) => toast.success(`Build #${b.id} started`),
+                    onError: toastError,
+                  })
+                }
+              >
+                <LuHammer className={busy ? 'animate-pulse' : undefined} />
+                {busy ? 'Building…' : 'Build now'}
+              </Button>
+            </div>
           </RequireAdmin>
         }
       />

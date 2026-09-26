@@ -82,7 +82,7 @@ func TestBuildFlow(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		b, err = s.execute(ctx, b.ID)
+		b, err = s.execute(ctx, b.ID, false)
 		if b.Status != want {
 			t.Fatalf("status %s (err %v), want %s: %+v", b.Status, err, want, b)
 		}
@@ -115,6 +115,21 @@ func TestBuildFlow(t *testing.T) {
 
 	build("skipped") // everything 304, nothing else changed
 
+	// force: full re-download (no conditional request) and a rebuild despite unchanged inputs.
+	hits, n304 := domains.hits, domains.n304
+	fb, err := s.insert(ctx, "manual")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fb, err = s.execute(ctx, fb.ID, true); fb.Status != "ok" || domains.hits != hits+1 || domains.n304 != n304 {
+		t.Fatalf("forced build: %+v err %v (hits %d→%d, 304s %d→%d)", fb, err, hits, domains.hits, n304, domains.n304)
+	}
+	var st string
+	if err := pool.QueryRow(ctx, "SELECT last_status FROM blocklist_sources WHERE kind = 'trustpositif_domains'").Scan(&st); err != nil ||
+		!strings.HasPrefix(st, "ok: ") || !strings.Contains(st, "MB/s, 1 stream") {
+		t.Fatalf("download timing missing from status: %q %v", st, err)
+	}
+
 	exec(t, pool, `INSERT INTO blocklist_sources (name, kind, content) VALUES ('wl', 'whitelist', 'b.com')`)
 	if b := build("ok"); b.Domains != 2 || b.Whitelisted != 1 || blocked("x.b.com") || !blocked("c.com") {
 		t.Fatalf("whitelist build: %+v", b)
@@ -143,11 +158,11 @@ func TestBuildFlow(t *testing.T) {
 
 	// Single flight: a manual build while one runs is refused.
 	s.mu.Lock()
-	if _, err := s.Start("manual"); err != errBusy {
+	if _, err := s.Start("manual", false); err != errBusy {
 		t.Fatalf("Start while busy: %v", err)
 	}
 	s.mu.Unlock()
-	b, err := s.Start("manual")
+	b, err := s.Start("manual", false)
 	if err != nil || b.Status != "running" {
 		t.Fatalf("Start: %+v %v", b, err)
 	}
