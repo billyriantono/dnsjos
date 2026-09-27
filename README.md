@@ -14,6 +14,7 @@
   <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white">
   <img alt="Tailwind v4" src="https://img.shields.io/badge/Tailwind-v4-38BDF8?logo=tailwindcss&logoColor=white">
   <img alt="shadcn/ui" src="https://img.shields.io/badge/shadcn%2Fui-Radix-111">
+  <a href="LICENSE.md"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-22c55e"></a>
 </p>
 
 <p align="center">
@@ -23,7 +24,8 @@
   <a href="#-quick-start">Quick start</a> ·
   <a href="#-deploy">Deploy</a> ·
   <a href="docs/OPERATIONS.md">Operations</a> ·
-  <a href="docs/SPEC.md">Spec</a>
+  <a href="docs/SPEC.md">Spec</a> ·
+  <a href="#-license">License</a>
 </p>
 
 ---
@@ -283,3 +285,11 @@ web/                  React 19 + Vite + Tailwind v4 + shadcn/ui
 migrations/           forward-only SQL, applied at startup
 deploy/               systemd units, env example, Caddyfile example
 ```
+
+## 📄 License
+
+DnsJos is released under the [MIT License](LICENSE.md). You can use, modify and ship it,
+including commercially, as long as the copyright and licence notice stay with it.
+
+dnsdist is a separate project by PowerDNS, licensed under the GPLv2. DnsJos only generates its
+configuration and talks to it over its console and webserver; it does not include or link dnsdist.
