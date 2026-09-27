@@ -188,7 +188,7 @@ func TestMeasure6(t *testing.T) {
 	pools, _ := parsePrefixes([]string{"2606:4700:3030::/44", "2606:4700:10::/48"})
 	aliases, _ := parsePrefixes([]string{"2606:4700::6810:0/110"})
 	run := func(p Prober) *Result {
-		res := &Result{Sites: map[string]string{"site1.test": "200"}}
+		res := &Result{Sites: map[string]string{"site1.test": "301"}} // aliases answer 200: a skipped redirect still qualifies
 		colo := func(ip string) (string, time.Duration) {
 			_, t, body := p.Fetch(context.Background(), TraceHost, ip, "/cdn-cgi/trace")
 			if c, ok := strings.CutPrefix(strings.TrimSpace(body), "colo="); ok {

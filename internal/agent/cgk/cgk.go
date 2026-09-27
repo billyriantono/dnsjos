@@ -277,7 +277,7 @@ func measure6(ctx context.Context, spec api.CGK, p Prober, res *Result, pools, a
 			return nil
 		}
 		for s, want := range res.Sites {
-			if code, _, _ := p.Fetch(ctx, s, ip, "/"); code != want {
+			if code, _, _ := p.Fetch(ctx, s, ip, "/"); !sameOutcome(code, want) {
 				return nil
 			}
 		}
@@ -304,6 +304,15 @@ func measure6(ctx context.Context, spec api.CGK, p Prober, res *Result, pools, a
 	}
 	res.Rewrite = append(res.Rewrite, rewrite...)
 	res.IPv6 = api.CGKIPv6OK
+}
+
+// sameOutcome: two HTTP statuses mean the same to a user when they are equal or both
+// "working" (2xx/3xx) — a site may skip a redirect on one edge address (seen: a site
+// answering 301 via its real IPv6 and 200 via a CGK IPv6 alias). "000" (no answer) and
+// errors must match exactly.
+func sameOutcome(a, b string) bool {
+	works := func(c string) bool { return len(c) == 3 && (c[0] == '2' || c[0] == '3') }
+	return a == b || works(a) && works(b)
 }
 
 // byFamily splits prefixes into IPv4 and IPv6.

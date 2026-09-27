@@ -38,11 +38,12 @@ func TestLearn(t *testing.T) {
 		"waf.test 104.20.0.2": "200", "waf.test 104.16.0.9": "403", // alias blocked: exclude
 		// spectrum.test: no HTTPS on either address → exclude
 		"flaky.test 104.20.0.4": "301", "flaky.test 104.16.0.9": "301",
+		"redir.test 104.20.0.5": "301", "redir.test 104.16.0.9": "200", // skipped redirect: still works
 	}, flaky: map[string]bool{"flaky.test 104.16.0.9": true}}
 	out := "ok.test. 104.20.0.1 104.16.0.9 50\nwaf.test. 104.20.0.2 104.16.0.9 40\n" +
-		"spectrum.test. 104.20.0.3 104.16.0.9 30\nflaky.test. 104.20.0.4 104.16.0.9 20\ngarbage line\n"
+		"spectrum.test. 104.20.0.3 104.16.0.9 30\nflaky.test. 104.20.0.4 104.16.0.9 20\nredir.test. 104.20.0.5 104.16.0.9 10\ngarbage line\n"
 	seen := ParseSeen(out)
-	if len(seen) != 4 || seen[0].Name != "ok.test" || seen[0].Hits != 50 {
+	if len(seen) != 5 || seen[0].Name != "ok.test" || seen[0].Hits != 50 {
 		t.Fatalf("ParseSeen: %+v", seen)
 	}
 	st := LearnState{}
@@ -57,7 +58,7 @@ func TestLearn(t *testing.T) {
 	if want := "waf.test:200/403 spectrum.test:000/000"; join(got) != want {
 		t.Fatalf("excluded %q, want %q", join(got), want)
 	}
-	if st["flaky.test"].Excluded || st.Checked() != 4 {
+	if st["flaky.test"].Excluded || st["redir.test"].Excluded || st.Checked() != 5 {
 		t.Fatal("one flaky answer must not exclude a site")
 	}
 
@@ -75,7 +76,7 @@ func TestLearn(t *testing.T) {
 		t.Fatal("a site that works through the alias again must be un-excluded")
 	}
 	// ok.test and flaky.test were not seen for more than a week: forgotten.
-	if st["ok.test"] != nil || st["flaky.test"] != nil || st["spectrum.test"] == nil {
+	if st["ok.test"] != nil || st["flaky.test"] != nil || st["redir.test"] != nil || st["spectrum.test"] == nil {
 		t.Fatalf("forgetting: %v", keys(st))
 	}
 }

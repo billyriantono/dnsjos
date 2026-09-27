@@ -118,6 +118,11 @@ func (c *Client) once(ctx context.Context, method, path string, body []byte, out
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
+		// The panel speaks HTTP/2: every request shares one connection, and a timed-out
+		// request does not close it. After the node's address changed, that connection
+		// (bound to the old address) hung every request until the agent restarted. Drop
+		// idle connections so the retry dials fresh.
+		c.HTTP.CloseIdleConnections()
 		return 0, nil, err
 	}
 	defer resp.Body.Close()

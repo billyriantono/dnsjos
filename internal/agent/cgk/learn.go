@@ -14,8 +14,9 @@ import (
 // its real Cloudflare IP and the alias it got; the agent drains that list (cgkSeen())
 // and checks the busiest names through both addresses. A name is excluded when its real
 // IP does not serve HTTPS for it (a Spectrum or other non-HTTP app: the alias cannot
-// carry it either) or the alias answers with a different HTTP status (IP-bound config,
-// WAF rules on the address, …). A mismatch must repeat once before it counts.
+// carry it either) or the alias answers differently (IP-bound config, WAF rules on the
+// address, …; 2xx and 3xx count as the same outcome, see sameOutcome). A mismatch must
+// repeat once before it counts.
 const (
 	learnChecks     = 40 // names checked per run, busiest first
 	learnWorkers    = 8
@@ -106,7 +107,7 @@ func Learn(ctx context.Context, p Prober, st LearnState, seen []Seen, now time.T
 	check := func(e *api.CGKLearned) verdict {
 		real, _, _ := p.Fetch(ctx, e.Name, e.RealIP, "/")
 		alias, _, _ := p.Fetch(ctx, e.Name, e.AliasIP, "/")
-		return verdict{real, alias, real == "000" || real != alias}
+		return verdict{real, alias, real == "000" || !sameOutcome(real, alias)}
 	}
 	results := parallelN(names, learnWorkers, func(n string) verdict {
 		v := check(byName[n])
