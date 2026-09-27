@@ -16,6 +16,8 @@ import type { Settings } from '@/lib/api/types'
 import { fmtDuration } from '@/lib/format'
 import { SETTINGS_BOUNDS } from '@/lib/settingsBounds'
 
+import { APITokensCard } from './APITokens'
+
 type NumKey = Exclude<keyof Settings, 'public_url'>
 
 const sections: { title: string; description: string; fields: { key: NumKey; label: string; unit: string; min: number; max: number; hint: (v: number) => string }[] }[] = [
@@ -88,6 +90,11 @@ export default function SettingsPage() {
       ) : (
         <Skeleton className="h-96 w-full" />
       )}
+      <RequireAdmin>
+        <div className="mt-4">
+          <APITokensCard />
+        </div>
+      </RequireAdmin>
     </>
   )
 }

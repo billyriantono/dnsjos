@@ -111,6 +111,29 @@ req 200 admin GET /api/v1/audit
 req 200 admin GET '/api/v1/audit?limit=5&before=999999'
 req '*' admin GET '/api/v1/audit?limit=abc&before=xyz'
 
+# ── read-only API tokens ──
+req 403 viewer GET /api/v1/api-tokens
+req 400 admin POST /api/v1/api-tokens '{"name":" "}'
+req 400 admin POST /api/v1/api-tokens '{"name":"x","expires_in_days":-1}'
+req 201 admin POST /api/v1/api-tokens '{"name":"grafana","expires_in_days":30}'
+APITOK=$(j .token) APITOK_ID=$(j .id)
+[[ $APITOK == djt_* ]] || { FAILS=$((FAILS + 1)); echo "FAIL api token format"; }
+req 200 "$APITOK" GET /api/v1/reports/blocked
+req 200 "$APITOK" GET /api/v1/overview
+req 401 "$APITOK" GET /api/v1/users
+req 401 "$APITOK" GET /api/v1/api-tokens
+req 401 "$APITOK" PUT /api/v1/settings '{"metrics_retention_days":10}'
+req 401 "$APITOK" POST /api/v1/blocklist/builds
+req 401 "$APITOK" GET /agent/v1/config
+req 401 djt_not-a-token GET /api/v1/overview
+req 200 admin GET /api/v1/api-tokens
+grep -q "$APITOK" "$TMP/body" && { FAILS=$((FAILS + 1)); echo "FAIL api token list leaks the secret"; }
+[ "$(j '.items[0].last_used_at')" != null ] || { FAILS=$((FAILS + 1)); echo "FAIL api token last_used_at not set"; }
+req 204 admin DELETE "/api/v1/api-tokens/$APITOK_ID"
+req 404 admin DELETE "/api/v1/api-tokens/$APITOK_ID"
+req 404 admin DELETE /api/v1/api-tokens/not-a-uuid
+req 401 "$APITOK" GET /api/v1/overview
+
 # ── settings ──
 req 200 viewer GET /api/v1/settings
 req 403 viewer PUT /api/v1/settings '{"metrics_retention_days":10}'

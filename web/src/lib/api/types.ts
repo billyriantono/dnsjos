@@ -561,6 +561,26 @@ export interface AllowEntryCreate {
   expires_at?: string // RFC 3339, must be in the future
 }
 
+/** SPEC §10: read-only API token (Authorization: Bearer djt_…); the secret is never listed. */
+export interface APIToken {
+  id: string
+  name: string
+  prefix: string // first 8 characters, for display
+  created_by_email: string
+  created_at: string
+  last_used_at: string | null
+  expires_at: string | null // null = never
+  revoked: boolean
+}
+export interface APITokenCreate {
+  name: string
+  expires_in_days?: number // omitted/0 = never
+}
+/** Create response: the only time `token` is returned. */
+export interface APITokenCreated extends APIToken {
+  token: string
+}
+
 export interface BlockedReportQuery {
   from?: string
   to?: string

@@ -161,6 +161,9 @@ The full initial schema is `migrations/0001_init.up.sql`. Summary:
   created_at, expires_at null, unique(kind, value))` — `0006`: the emergency allowlist (§7.5).
   `value` is normalized (domain: lowercase, no trailing dot; ip: address or masked CIDR).
   Rows with `expires_at ≤ now()` are ignored everywhere and deleted by an hourly job.
+* `api_tokens(id uuid, name, token_hash bytea unique (sha256), prefix (first 8 chars),
+  created_by → users (set null), created_at, last_used_at, expires_at null, revoked_at null)`
+  — `0007`: read-only API tokens (§10).
 
 ---
 
@@ -525,6 +528,14 @@ else 422 `weak_password`.
 Mutating requests must send header `X-Requested-With: dnsjos` (CSRF guard) — the SPA's
 fetch wrapper always adds it. Login rate limit: 10/min per IP.
 Roles: `viewer` = GET only; `admin` = everything.
+Read-only API tokens: every `Viewer` route (GET-only by construction) also accepts
+`Authorization: Bearer djt_…` (`djt_` + base64url of 32 random bytes). The token is valid
+when sha256(token) is in `api_tokens`, not revoked, not expired and its creator is an
+existing, enabled user (disabling or deleting the admin disables their tokens); the request runs as a
+synthetic viewer principal with no user id (`GET /auth/me` returns it with an empty `id`).
+Session, admin and agent routes and every non-GET method never accept an API token (no
+cookie → 401). Invalid, expired or revoked token → 401 `unauthorized`. `last_used_at` is
+written at most once per minute per token; tokens are never logged.
 
 Response envelope: success → the resource JSON directly (no wrapper). Errors →
 `api.ErrorBody` `{"error": {"code": "not_found", "message": "…"}}` with proper status.
@@ -566,6 +577,7 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET /api/v1/offenders?active=true&node_id` | `List[Offender]` — abusive clients (open + history) |
 | `GET /api/v1/users` · `POST` · `PATCH /users/{id}` · `DELETE /users/{id}` | admin only: `List[User]` · `UserCreate` → 201 `User` · `UserPatch` → `User` · 204 |
 | `GET /api/v1/audit?limit&before` | admin only: `List[AuditEntry]`, newest first, `before` = audit id cursor |
+| `GET /api/v1/api-tokens` · `POST` · `DELETE /api-tokens/{id}` | admin only: `List[APIToken{id,name,prefix,created_by_email,created_at,last_used_at,expires_at,revoked}]` (newest first, incl. revoked; never the secret) · `APITokenCreate{name,expires_in_days?}` (name 1..100 bytes, days 0..3650, 0/omitted = never; 400 otherwise) → 201 `APITokenCreated` (the entry plus `token`, returned only here) · revoke → 204 (404 unknown or already revoked). Audited as `api_token.create` / `api_token.revoke` |
 | `GET/PUT /api/v1/settings` | `Settings` · PUT decodes over current values (partial body ok) → `Settings`; `blocklist_download_segments` 1..16 (§7.1), other ranges as in the UI; 400 otherwise |
 | `GET /healthz` · `GET /readyz` (DB ping) | health |
 | `GET /api/v1/branding` | public: `Branding{name, tagline, assets}` — `assets` has every `api.BrandingAssets` key (`login_logo`, `navbar_light`, `navbar_dark`, `login_bg`, `login_bg_mobile`, `cloud`, `favicon_ico`, `icon_192`, `icon_512`, `apple_touch`), each `/branding/<file>?v=<mtime>` or `null` when the file is absent (§15) |
@@ -652,7 +664,12 @@ Never touches an existing `/etc/dnsdist` without backing it up first.
 ## 14. Security
 
 * Node tokens and session tokens stored as sha256; enrollment tokens single-use, TTL.
-* Agent endpoints only accept bearer auth; UI endpoints only session auth.
+* Agent endpoints only accept bearer auth (node token); UI endpoints only session auth,
+  except that GET-only viewer routes also accept a read-only API token (`djt_…`, §10).
+  API tokens are stored as sha256 and looked up by that hash (no secret comparison),
+  shown once at creation, never logged and never accepted on admin, session-mutating or
+  agent routes. A leaked token exposes everything a viewer can read — give it an expiry
+  and revoke it when unused.
 * All SQL parameterized. JSON bodies limited to 1 MiB (heartbeat) / 10 MiB (blocked).
 * Rendered config never contains panel secrets; node secrets stay on the node.
 * The UI masks `web_password`, `web_api_key`, `console_key` in previews.

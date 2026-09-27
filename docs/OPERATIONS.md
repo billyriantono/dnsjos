@@ -141,6 +141,26 @@ without waiting for a new list:
 `whitelist` blocklist sources still work for permanent, reviewed exceptions; they only take
 effect with the next build.
 
+## Grafana / read-only API
+
+Dashboards and scripts read panel data with an API token instead of a user login:
+
+1. Settings → API tokens → **New token** (admin): a name (e.g. `grafana`) and an expiry.
+   The `djt_…` token is shown **once** — copy it into the tool's secret store.
+2. Send it as a bearer token on any GET endpoint a viewer can read (SPEC §10):
+
+   ```sh
+   curl -H 'Authorization: Bearer djt_…' \
+     'https://panel.example/api/v1/reports/blocked?from=2026-01-01&to=2026-01-31'
+   ```
+
+   In Grafana, use a JSON/Infinity data source with the panel URL and a custom header
+   `Authorization: Bearer djt_…`.
+3. A token is a viewer on GET routes only; admin routes, any change (POST/PUT/PATCH/DELETE)
+   and agent routes return 401. An invalid, expired or revoked token is 401 too.
+4. Rotate by creating a new token, switching the tool over, then revoking the old one (the
+   list shows *Last used*, updated at most once a minute). Create and revoke are audited.
+
 ## Files on a node
 
 | Path | What |

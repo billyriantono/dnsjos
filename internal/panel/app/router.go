@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/billyriantono/dnsjos/internal/panel/db"
@@ -35,8 +36,9 @@ func UserFrom(ctx context.Context) (api.User, bool) {
 }
 
 // UserIDFrom returns the authenticated user's id, or nil (handy for audit/created_by).
+// API-token principals have no user id.
 func UserIDFrom(ctx context.Context) *string {
-	if u, ok := UserFrom(ctx); ok {
+	if u, ok := UserFrom(ctx); ok && u.ID != "" {
 		return &u.ID
 	}
 	return nil
@@ -48,25 +50,84 @@ func NodeIDFrom(ctx context.Context) string {
 	return id
 }
 
+// APITokenPrefix starts every read-only API token (SPEC §10).
+const APITokenPrefix = "djt_"
+
 // Router wraps http.ServeMux; every route declares its auth requirement.
 type Router struct {
 	mux *http.ServeMux
 	d   *Deps
+
+	usedMu sync.Mutex
+	used   map[string]time.Time // API token id → last last_used_at write
 }
 
-func NewRouter(d *Deps) *Router { return &Router{mux: http.NewServeMux(), d: d} }
+func NewRouter(d *Deps) *Router {
+	return &Router{mux: http.NewServeMux(), d: d, used: map[string]time.Time{}}
+}
 
 func (rt *Router) ServeHTTP(w http.ResponseWriter, r *http.Request) { rt.mux.ServeHTTP(w, r) }
 
 // Public registers a route without authentication.
 func (rt *Router) Public(pattern string, h http.HandlerFunc) { rt.mux.Handle(pattern, h) }
 
-// Viewer registers a read-only route open to any signed-in user. Pattern must be GET.
+// Viewer registers a read-only route open to any signed-in user and to read-only API
+// tokens (Authorization: Bearer djt_…). Pattern must be GET; no other route kind
+// accepts API tokens.
 func (rt *Router) Viewer(pattern string, h http.HandlerFunc) {
 	if !strings.HasPrefix(pattern, "GET ") {
 		panic("app: Viewer routes must be GET-only: " + pattern)
 	}
-	rt.mux.Handle(pattern, rt.session("", h))
+	sess := rt.session("", h)
+	rt.mux.Handle(pattern, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if tok, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer "); ok {
+			rt.apiToken(w, r, tok, h)
+			return
+		}
+		sess.ServeHTTP(w, r)
+	}))
+}
+
+// apiToken serves a Viewer route for a valid API token as a synthetic viewer (no user id).
+// The lookup is by sha256 of the token, so no secret is compared byte by byte.
+func (rt *Router) apiToken(w http.ResponseWriter, r *http.Request, tok string, h http.HandlerFunc) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead { // Viewer patterns are GET; belt and braces
+		httpx.WriteError(w, http.StatusForbidden, "forbidden", "API tokens are read-only")
+		return
+	}
+	deny := func() {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "invalid, expired or revoked API token")
+	}
+	if !strings.HasPrefix(tok, APITokenPrefix) {
+		deny()
+		return
+	}
+	var id, name string
+	// A token dies with its creator: disabling or deleting the admin who made it must not
+	// leave a working credential behind (created_by is NULL once the user is deleted).
+	err := rt.d.Pool.QueryRow(r.Context(), `SELECT t.id, t.name FROM api_tokens t
+		JOIN users u ON u.id = t.created_by AND NOT u.disabled
+		WHERE t.token_hash = $1 AND t.revoked_at IS NULL AND (t.expires_at IS NULL OR t.expires_at > now())`,
+		HashToken(tok)).Scan(&id, &name)
+	if db.IsNotFound(err) {
+		deny()
+		return
+	} else if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	now := time.Now()
+	rt.usedMu.Lock()
+	stale := now.Sub(rt.used[id]) >= time.Minute
+	if stale {
+		rt.used[id] = now
+	}
+	rt.usedMu.Unlock()
+	if stale {
+		rt.d.Pool.Exec(r.Context(), "UPDATE api_tokens SET last_used_at = now() WHERE id = $1", id)
+	}
+	u := api.User{Name: "API token " + name, Role: api.RoleViewer}
+	h(w, r.WithContext(context.WithValue(r.Context(), userKey, u)))
 }
 
 // Session registers a route for any signed-in user and any method (self-service

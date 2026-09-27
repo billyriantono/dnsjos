@@ -1,4 +1,4 @@
-// Package auth handles login/logout/sessions, users CRUD and the first admin.
+// Package auth handles login/logout/sessions, users CRUD, API tokens and the first admin.
 package auth
 
 import (
@@ -148,6 +148,10 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Admin("POST /api/v1/users", h.createUser)
 	r.Admin("PATCH /api/v1/users/{id}", h.patchUser)
 	r.Admin("DELETE /api/v1/users/{id}", h.deleteUser)
+
+	r.Admin("GET /api/v1/api-tokens", h.listAPITokens)
+	r.Admin("POST /api/v1/api-tokens", h.createAPIToken)
+	r.Admin("DELETE /api/v1/api-tokens/{id}", h.revokeAPIToken)
 
 	d.Jobs.Every("session-cleanup", time.Hour, func(ctx context.Context) error {
 		_, err := d.Pool.Exec(ctx, "DELETE FROM sessions WHERE expires_at < now()")

@@ -22,9 +22,10 @@ import (
 )
 
 type client struct {
-	t   *testing.T
-	c   *http.Client
-	url string
+	t      *testing.T
+	c      *http.Client
+	url    string
+	bearer string
 }
 
 func (c *client) do(method, path string, body any, csrf bool) (int, []byte) {
@@ -37,6 +38,9 @@ func (c *client) do(method, path string, body any, csrf bool) (int, []byte) {
 	req, _ := http.NewRequest(method, c.url+path, rd)
 	if csrf {
 		req.Header.Set("X-Requested-With", "dnsjos")
+	}
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
 	}
 	resp, err := c.c.Do(req)
 	if err != nil {
@@ -183,5 +187,102 @@ func TestAuthFlow(t *testing.T) {
 	}
 	if code != 429 {
 		t.Fatalf("rate limit: last status %d", code)
+	}
+}
+
+func TestAPITokens(t *testing.T) {
+	pool := dbtest.New(t, "auth_tokens")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	d := &app.Deps{
+		Pool: pool, Log: log, Live: app.NewLiveStore(), Jobs: jobs.New(ctx, log),
+		Settings: app.NewSettings(pool, "http://127.0.0.1:8080"),
+		Cfg:      config.Config{BootstrapAdminEmail: "admin@example.com", BootstrapAdminPassword: "correct-horse"},
+	}
+	if err := auth.Bootstrap(ctx, d); err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(server.Handler(d))
+	defer ts.Close()
+	admin := newClient(t, ts.URL)
+	admin.expect(200, "POST", "/api/v1/auth/login", api.LoginRequest{Email: "admin@example.com", Password: "correct-horse"})
+
+	admin.expect(400, "POST", "/api/v1/api-tokens", api.APITokenCreate{Name: " "})
+	admin.expect(400, "POST", "/api/v1/api-tokens", api.APITokenCreate{Name: "x", ExpiresInDays: -1})
+	var tok api.APITokenCreated
+	json.Unmarshal(admin.expect(201, "POST", "/api/v1/api-tokens", api.APITokenCreate{Name: "grafana", ExpiresInDays: 30}), &tok)
+	if !strings.HasPrefix(tok.Token, "djt_") || len(tok.Token) != 4+43 || tok.Prefix != tok.Token[:8] ||
+		tok.ExpiresAt == nil || tok.CreatedByEmail != "admin@example.com" || tok.Revoked || tok.LastUsedAt != nil {
+		t.Fatalf("created: %+v", tok)
+	}
+
+	g := &client{t: t, c: http.DefaultClient, url: ts.URL, bearer: tok.Token}
+	g.expect(200, "GET", "/api/v1/reports/blocked", nil)
+	g.expect(200, "GET", "/api/v1/overview", nil)
+	var me api.Session
+	json.Unmarshal(g.expect(200, "GET", "/api/v1/auth/me", nil), &me)
+	if me.User.Role != api.RoleViewer || me.User.ID != "" || me.User.Email != "" {
+		t.Fatalf("token principal: %+v", me.User)
+	}
+	g.expect(401, "GET", "/api/v1/users", nil)                                 // admin route
+	g.expect(401, "GET", "/api/v1/api-tokens", nil)                            // admin route
+	g.expect(401, "POST", "/api/v1/blocklist/builds", nil)                     // mutating
+	g.expect(401, "POST", "/api/v1/api-tokens", api.APITokenCreate{Name: "x"}) // mutating
+	g.expect(401, "PATCH", "/api/v1/auth/password", api.PasswordChange{})      // session route
+	g.expect(401, "GET", "/agent/v1/config", nil)                              // agent route
+	for _, bad := range []string{"djt_nope", "not-a-token", tok.Token + "x"} {
+		(&client{t: t, c: http.DefaultClient, url: ts.URL, bearer: bad}).expect(401, "GET", "/api/v1/overview", nil)
+	}
+
+	var list api.List[api.APIToken]
+	b := admin.expect(200, "GET", "/api/v1/api-tokens", nil)
+	json.Unmarshal(b, &list)
+	if strings.Contains(string(b), tok.Token) || strings.Contains(string(b), "token_hash") || list.Total != 1 || list.Items[0].LastUsedAt == nil {
+		t.Fatalf("list: %s", b)
+	}
+
+	// expired
+	var exp api.APITokenCreated
+	json.Unmarshal(admin.expect(201, "POST", "/api/v1/api-tokens", api.APITokenCreate{Name: "old"}), &exp)
+	eg := &client{t: t, c: http.DefaultClient, url: ts.URL, bearer: exp.Token}
+	eg.expect(200, "GET", "/api/v1/overview", nil)
+	if _, err := pool.Exec(ctx, "UPDATE api_tokens SET expires_at = now() - interval '1 minute' WHERE id = $1", exp.ID); err != nil {
+		t.Fatal(err)
+	}
+	eg.expect(401, "GET", "/api/v1/overview", nil)
+
+	// a disabled creator takes their tokens down with them (and back when re-enabled)
+	for _, disabled := range []bool{true, false} {
+		if _, err := pool.Exec(ctx, "UPDATE users SET disabled = $1 WHERE email = 'admin@example.com'", disabled); err != nil {
+			t.Fatal(err)
+		}
+		want := 200
+		if disabled {
+			want = 401
+		}
+		g.expect(want, "GET", "/api/v1/overview", nil)
+	}
+	admin.expect(200, "POST", "/api/v1/auth/login", api.LoginRequest{Email: "admin@example.com", Password: "correct-horse"})
+
+	// revoked
+	admin.expect(204, "DELETE", "/api/v1/api-tokens/"+tok.ID, nil)
+	admin.expect(404, "DELETE", "/api/v1/api-tokens/"+tok.ID, nil)
+	admin.expect(404, "DELETE", "/api/v1/api-tokens/not-a-uuid", nil)
+	g.expect(401, "GET", "/api/v1/reports/blocked", nil)
+	json.Unmarshal(admin.expect(200, "GET", "/api/v1/api-tokens", nil), &list)
+	if list.Total != 2 || list.Items[1].ID != tok.ID || !list.Items[1].Revoked {
+		t.Fatalf("list after revoke: %+v", list)
+	}
+
+	var entries api.List[api.AuditEntry]
+	b = admin.expect(200, "GET", "/api/v1/audit", nil)
+	json.Unmarshal(b, &entries)
+	actions := map[string]int{}
+	for _, e := range entries.Items {
+		actions[e.Action]++
+	}
+	if actions["api_token.create"] != 2 || actions["api_token.revoke"] != 1 || strings.Contains(string(b), tok.Token) {
+		t.Fatalf("audit: %v", actions)
 	}
 }

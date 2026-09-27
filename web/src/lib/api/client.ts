@@ -5,6 +5,9 @@ import type {
   AnalyticsReport,
   AllowEntry,
   AllowEntryCreate,
+  APIToken,
+  APITokenCreate,
+  APITokenCreated,
   AuditEntry,
   AuditQuery,
   BlockedReport,
@@ -128,6 +131,11 @@ export const api = {
     update: (id: string, u: UserPatch) => patch<User>(`${V1}/users/${id}`, u),
     remove: (id: string) => del(`${V1}/users/${id}`),
   },
+  apiTokens: {
+    list: () => get<List<APIToken>>(`${V1}/api-tokens`),
+    create: (t: APITokenCreate) => post<APITokenCreated>(`${V1}/api-tokens`, t),
+    revoke: (id: string) => del(`${V1}/api-tokens/${id}`),
+  },
   nodes: {
     list: () => get<List<Node>>(`${V1}/nodes`),
     get: (id: string) => get<Node>(`${V1}/nodes/${id}`),
@@ -240,6 +248,7 @@ export const qk = {
   analytics: (q: AnalyticsQuery) => ['analytics', q] as const,
   offenders: (q: OffendersQuery) => ['offenders', q] as const,
   users: ['users'] as const,
+  apiTokens: ['api-tokens'] as const,
   audit: (q: AuditQuery) => ['audit', q] as const,
   settings: ['settings'] as const,
 }
@@ -319,6 +328,7 @@ export const useAnalytics = (q: AnalyticsQuery) =>
   useQuery({ queryKey: qk.analytics(q), queryFn: () => api.analytics.report(q) })
 export const useOffenders = (q: OffendersQuery = {}) =>
   useQuery({ queryKey: qk.offenders(q), queryFn: () => api.offenders.list(q), refetchInterval: LIVE })
+export const useAPITokens = () => useQuery({ queryKey: qk.apiTokens, queryFn: api.apiTokens.list })
 export const useUsers = (enabled = true) => useQuery({ queryKey: qk.users, queryFn: api.users.list, enabled })
 export const useAudit = (q: AuditQuery = {}) => useQuery({ queryKey: qk.audit(q), queryFn: () => api.audit.list(q) })
 export const useSettings = () => useQuery({ queryKey: qk.settings, queryFn: api.settings.get })
@@ -403,6 +413,9 @@ export const useCreateUser = () => useMut(api.users.create, () => [qk.users])
 export const useUpdateUser = () =>
   useMut((a: { id: string; patch: UserPatch }) => api.users.update(a.id, a.patch), () => [qk.users, qk.me])
 export const useDeleteUser = () => useMut(api.users.remove, () => [qk.users])
+
+export const useCreateAPIToken = () => useMut(api.apiTokens.create, () => [qk.apiTokens])
+export const useRevokeAPIToken = () => useMut(api.apiTokens.revoke, () => [qk.apiTokens])
 
 export const useCreateUpgrade = () => useMut(api.upgrades.create, () => [qk.upgrades, qk.nodes])
 export const useUpgradeAction = () =>
