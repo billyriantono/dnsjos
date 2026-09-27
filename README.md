@@ -23,6 +23,7 @@
   <a href="#-how-it-works">How it works</a> ·
   <a href="#-quick-start">Quick start</a> ·
   <a href="DEPLOY.md">Deploy</a> ·
+  <a href="#-deploy-with-an-ai-agent">AI deploy</a> ·
   <a href="docs/OPERATIONS.md">Operations</a> ·
   <a href="docs/SPEC.md">Spec</a> ·
   <a href="#-license">License</a>
@@ -268,6 +269,46 @@ Adopt one node at a time, so customers keep resolving. See the
 
 The panel can also carry your own brand (name, logos, login background) without a
 rebuild; see `DNSJOS_BRAND_*` in [`deploy/dnsjos.env.example`](deploy/dnsjos.env.example).
+
+## 🤖 Deploy with an AI agent
+
+[DEPLOY.md](DEPLOY.md) is written to be followed literally by a coding agent such as Claude Code,
+Codex or Cursor. Fill in the values in angle brackets, then paste this prompt into an agent that can
+run shell commands and reach your servers over SSH:
+
+````text
+Deploy DnsJos (https://github.com/billyriantono/dnsjos) to production by following DEPLOY.md
+in that repository step by step. Clone the repo first and read DEPLOY.md completely before you
+run anything.
+
+My inputs:
+- PANEL_HOST: <root@panel-ip>              (Debian 12/13 or Ubuntu 22.04/24.04)
+- PANEL_DOMAIN: <dnsjos.example.com>        (its DNS record already points to PANEL_HOST)
+- ADMIN_EMAIL: <ops@example.com>
+- CLIENT_ACL: <customer prefixes allowed to query, e.g. 198.51.100.0/22, 2001:db8::/32>
+- UPSTREAMS: <resolver ip:port with weights, e.g. 192.0.2.53:53 w40, 1.1.1.1:53 w10>
+- BLOCKPAGE_V4 / BLOCKPAGE_V6: <addresses, or "blocking off">
+- TRUSTED: <NAT pools, monitoring and office prefixes exempt from per-client rate limits>
+- NODES (one per line; say whether dnsdist is ALREADY running there):
+  - <dns1> <root@node-ip> <existing dnsdist | new server> <DoH/DoT cert path, or none>
+
+Rules:
+1. Follow DEPLOY.md in order. Run the check after every step; if a check fails, stop and show
+   me the exact output. Do not improvise workarounds on production.
+2. Ask me for any missing value. Never invent hostnames, addresses, prefixes or passwords.
+3. Resolver nodes are production. Handle them one at a time, and only continue when the
+   previous node is online in the panel and answers `dig @NODE example.com`.
+4. On a server that already runs dnsdist, always use `--adopt --no-start`. Show me the
+   `dnsjos-agent plan` output and wait for my approval before starting the agent.
+5. Generate the passwords yourself. Show each secret to me once, then never repeat it, and
+   never write secrets into files inside the repository.
+6. Before you start, give me a short plan listing every server you will touch and what you
+   will change there. Wait for my go-ahead. When you finish, report the result of the final
+   verification table in DEPLOY.md §7.
+````
+
+The agent will stop and ask before anything that could interrupt DNS: it waits for your
+approval of the plan and of each adoption.
 
 ## 📚 Documentation
 
