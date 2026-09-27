@@ -168,7 +168,7 @@ SELECT n.id, n.name, n.hostname, n.public_ip, n.labels, n.status, n.profile_id, 
 FROM nodes n
 LEFT JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
 LEFT JOIN LATERAL (SELECT version FROM config_versions v WHERE v.profile_id = p.id AND v.published
-                   ORDER BY v.version DESC LIMIT 1) pv ON true
+                   AND (n.config_pin IS NULL OR v.version <= n.config_pin) ORDER BY v.version DESC LIMIT 1) pv ON true
 WHERE n.deleted_at IS NULL`
 
 func (s *svc) queryNodes(ctx context.Context, where string, args ...any) ([]api.Node, error) {
@@ -315,7 +315,11 @@ func (s *svc) patchNode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	err = pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `UPDATE nodes SET name = $2, labels = $3, profile_id = $4, overrides = $5
+		if _, err := tx.Exec(ctx, `UPDATE nodes SET name = $2, labels = $3, profile_id = $4, overrides = $5,
+				-- a pin is a version of the profile the node follows (none = "default")
+				config_pin = CASE WHEN coalesce(profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
+					IS DISTINCT FROM coalesce($4::uuid, (SELECT id FROM config_profiles WHERE name = 'default'))
+					THEN NULL ELSE config_pin END
 			WHERE id = $1 AND deleted_at IS NULL`, id, cur.Name, cur.Labels, cur.ProfileID, []byte(cur.Overrides)); err != nil {
 			return err
 		}

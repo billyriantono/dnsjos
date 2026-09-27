@@ -79,7 +79,8 @@ export function RunCard({ id }: { id: number }) {
     <Card>
       <CardHeader>
         <CardTitle className="flex flex-wrap items-center gap-2">
-          Run #{run.id}: {run.kind} → <span className="font-mono">{run.target_version || 'panel agent'}</span>
+          Run #{run.id}: {run.kind === 'config' ? 'config rollout' : run.kind} →{' '}
+          <span className="font-mono">{run.kind === 'config' ? `v${run.target_version}` : run.target_version || 'panel agent'}</span>
           <StatusBadge status={run.status} />
         </CardTitle>
         <CardDescription>

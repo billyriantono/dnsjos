@@ -133,8 +133,9 @@ The full initial schema is `migrations/0001_init.up.sql`. Summary:
 * `nodes(id uuid, name unique, hostname, public_ip inet, labels jsonb, status
   'pending'|'online'|'degraded'|'offline', token_hash bytea, enrolled_at, last_seen_at,
   agent_version, dnsdist_version, os, applied_config_version int, applied_blocklist_sha256,
-  last_error text, created_at, deleted_at, adopted bool, seeded_blocklist_sha256)` — the
-  last two are added by `0002_adopt` (§17)
+  last_error text, created_at, deleted_at, adopted bool, seeded_blocklist_sha256,
+  config_pin int)` — `adopted`/`seeded_blocklist_sha256` are added by `0002_adopt` (§17),
+  `config_pin` by `0008_config_rollout` (§6.5)
 * `enrollment_tokens(id, token_hash, node_name, labels, created_by, expires_at, used_at, used_by_node)`
 * `config_profiles(id uuid, name unique, description, created_at)` — a profile is a
   reusable desired state; each node references exactly one profile.
@@ -183,11 +184,12 @@ panel on save and in the agent before rendering.
   },
   "acl": ["10.0.0.0/8", "100.64.0.0/10", "…"],            // client allowlist
   "upstreams": {
-    "policy": "whashed",            // whashed | wrandom | leastOutstanding | roundrobin | firstAvailable
+    "policy": "whashedLatency",     // whashed | whashedLatency | wrandom | leastOutstanding | roundrobin | firstAvailable
     "servers": [ {"address": "192.0.2.53:53", "weight": 40, "order": 1, "sockets": 4, "name": "resolver1"} ],
-    "health_check_interval_s": 1
+    "health_check_interval_s": 1,
+    "latency_floor_ms": 0           // whashedLatency: faster than this = equally fast (0 = 20 ms), 0..10000
   },
-  "cache": {"enabled": true, "max_entries": 500000, "min_ttl": 0, "max_ttl": 86400, "stale_ttl": 60},
+  "cache": {"enabled": true, "max_entries": 500000, "min_ttl": 0, "max_ttl": 86400, "stale_ttl": 3600},
   "blocking": {
     "enabled": true,
     "blockpage_ipv4": "192.0.2.10",
@@ -235,6 +237,9 @@ Saving a profile creates a new `config_versions` row (draft). **Publish** marks 
 published; nodes on that profile get the newest *published* version. The panel shows a
 diff between any two versions (JSON diff rendered in UI) and a rendered-Lua preview.
 
+**Staged publish** (`?staged=true`, the UI default for a profile with more than one
+node): see §6.5.
+
 ### 6.3 Per-node overrides
 
 `nodes.overrides` is a JSON merge-patch (RFC 7396) applied over the profile spec.
@@ -267,8 +272,30 @@ Rendering rules (must be byte-for-byte deterministic for the same input):
 4. DoH: `addDOHLocal(addr, cert, key, path)`; DoT: `addTLSLocal(addr, cert, key)`.
 5. `controlSocket("127.0.0.1:5199")`, `setKey(console_key)`, `setConsoleACL("127.0.0.1/32")`.
 6. `webserver(webserver.listen)`, `setWebserverConfig({password=…, apiKey=…, acl=…, statsRequireAuthentication=true})`.
-7. Packet cache: `newPacketCache(max_entries, {minTTL=…, maxTTL=…, staleTTL=…})` on pool `""`.
-8. Upstreams: `newServer({address=, name=, weight=, order=, sockets=, pool="", healthCheckMode="up"? no: default})`, `setServerPolicy(<policy>)`.
+   Password and API key are written **pre-hashed** in dnsdist's scrypt format
+   (`$scrypt$ln=10,p=1,r=8$<salt>$<hash>`, dnsdist's `hashPassword()` defaults); the
+   plaintext stays in the agent's `secrets.json`, which is what the agent, Prometheus and
+   Grafana send. The salt is derived from the secret (sha256 with a fixed prefix) so the
+   render stays deterministic — a random salt would change `dnsdist.conf`, and restart
+   dnsdist, on every apply. A value that is already `$scrypt$…` is written as is.
+7. Packet cache on pool `""`: `newPacketCache(max_entries, {minTTL=…, maxTTL=…})`; with
+   `stale_ttl` > 0 also `staleTTL=min(stale_ttl, 60), keepStaleData=true` and
+   `setStaleCacheEntriesTTL(stale_ttl)`. dnsdist's cache cleaner deletes every expired entry
+   each 60 s; `keepStaleData` suspends that while all backends of the pool are down, which
+   is what lets expired answers be served for up to `stale_ttl` s (with a TTL ≤ 60 s, so
+   clients come back soon after the upstreams recover). Without it only entries expired in
+   the last cleaner interval survive an outage.
+8. Upstreams: `newServer({address=, name=, weight=, order=, sockets=, pool="", checkInterval=})`,
+   then `setServerPolicy(<policy>)`, except `whashedLatency`: a per-thread Lua FFI policy
+   (`setServerPolicyLuaFFIPerThread`, lock-free; needs dnsdist built with LuaJIT, as the
+   repo.powerdns.com packages are). It is `whashed` — the qname hash picks the server, so a
+   name keeps going to the same upstream — over *effective* weights recomputed once a
+   second per thread: `max(1, round(weight × fastest / latency))` for every up server, where
+   latency is dnsdist's per-server average (µs, last 128 UDP queries) raised to the floor
+   (`latency_floor_ms`, 0 = 20 ms). So a resolver 5× slower than the fastest gets a fifth of
+   its configured share and wins it back as it speeds up; jitter below the floor changes
+   nothing. Weight ≥ 1 keeps a slow server measured. No up server → the policy returns "none"
+   (dnsdist ≥ 1.9.2), which is what lets stale cache entries be served.
 9. Blocking (blocking.lua):
    * `newCDBKVStore(cdb_path, 60)` (re-open when the file changes).
    * Query rule: `KeyValueStoreLookupRule(kvs, KeyValueLookupKeySuffix(0, true))` →
@@ -322,6 +349,37 @@ The renderer has golden-file tests (`testdata/*.golden`) for: defaults, DoH+DoT,
 off, cgk off, multiple upstreams with weights, extra_lua.
 
 ---
+
+### 6.5 Staged publish (one node at a time)
+
+`POST /profiles/{id}/versions/{v}/publish?staged=true` publishes `v` through the upgrade
+orchestrator (§18) instead of to every node at once:
+
+* Refused (422 `invalid_rollout`) when the profile has nothing published yet or `v` is not
+  newer than its newest published version; 409 `upgrade_running` while any upgrade run is
+  running or paused; 409 `nodes_not_ready` unless every live node is `online`.
+* In the publish transaction every live node following the profile (`profile_id`, or none
+  = "default") is pinned: `nodes.config_pin` = the previous newest published version (a
+  node still pinned lower by an aborted rollout keeps its lower pin). Everywhere the panel
+  picks "the newest published version" for a node it takes the newest `<= config_pin`
+  (agent config + ETag, heartbeat ack, node list, rendered preview). Then `v` is marked
+  published and an `upgrade_runs` row `kind='config'`, `target_version='<v>'`,
+  `profile_id` is created with one step per node, least busy first, `from_version` = the
+  node's pin. The response is the `ConfigVersion`, `Location: /api/v1/upgrades/<run id>`.
+  No node on the profile → a plain publish.
+* A step clears the node's pin; its next heartbeat ack announces the new version (≤ one
+  heartbeat interval). Health gate: the node reports `applied_config_version` = the
+  version it is now served, is `online`, has a heartbeat newer than the step start, and
+  its qps is back (the same qps gate as dnsdist upgrades — an apply restarts dnsdist).
+  An `apply_error` in its heartbeat fails the step at once (the node was online when the
+  step started, so the error is from this version; the agent already rolled back).
+* A failed step (error or 10 min gate timeout) pins the node back to `from_version` and
+  pauses the run. Resume retries that node; abort leaves every node the run has not
+  reached on its pin.
+* A plain publish of the profile clears all its pins (so after an abort, publishing the
+  same version plainly sends it to every node). It is refused (409 `upgrade_running`)
+  while a config run of that profile is running or paused.
+* Changing a node's profile clears its pin.
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 
@@ -563,7 +621,7 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `GET/POST /api/v1/profiles` · `GET/PATCH/DELETE /profiles/{id}` | `List[Profile]` · `ProfileRequest{name,description,copy_from}` → 201 `Profile` · `Profile` · 204 (409 while nodes use it; nodes without a profile count as users of `default`). Create also publishes version 1: `DefaultConfigSpec()`, or the newest published spec of profile `copy_from` (400 when it has none) |
 | `GET /api/v1/profiles/{id}/versions` · `GET .../versions/{v}` | `List[ConfigVersion]` (newest first) · `ConfigVersion` |
 | `POST /api/v1/profiles/{id}/versions` | `VersionCreate{spec,comment}` (validated, draft) → 201 `ConfigVersion` |
-| `POST /api/v1/profiles/{id}/versions/{v}/publish` | → `ConfigVersion` |
+| `POST /api/v1/profiles/{id}/versions/{v}/publish` | → `ConfigVersion`; `?staged=true` = one node at a time (§6.5): 422 `invalid_rollout`, 409 `upgrade_running`/`nodes_not_ready`, `Location` of the run. A plain publish clears the profile's pins; 409 `upgrade_running` while a config run of that profile is active |
 | `GET /api/v1/profiles/{id}/versions/{a}/diff/{b}` | `ConfigVersionDiff{a,b,changes}` — both versions plus `SpecChange{path,op,old,new}` entries turning a into b |
 | `POST /api/v1/profiles/{id}/preview` | `PreviewRequest{spec}` (validated, not saved) → `RenderedConfig` |
 | `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate` → 201 `BlocklistSource` · `BlocklistSourcePatch` → `BlocklistSource` · 204 |
@@ -629,7 +687,7 @@ from a file kept outside git.
 * ACL: private, CGNAT, loopback, link-local and ULA space only
   (`10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,
   192.168.0.0/16, ::1/128, fc00::/7, fe80::/10`).
-* Upstreams (policy whashed): 1.1.1.1:53 w30, 1.0.0.1:53 w30, 8.8.8.8:53 w20,
+* Upstreams (policy whashedLatency): 1.1.1.1:53 w30, 1.0.0.1:53 w30, 8.8.8.8:53 w20,
   8.8.4.4:53 w20; sockets 4 each.
 * Blockpage: documentation addresses 192.0.2.10 / 2001:db8::10 (RFC 5737 / RFC 3849) —
   every deployment must set its own.
@@ -793,7 +851,7 @@ one is healthy again.
   `node_commands.params jsonb` carries `version`/`series`; `nodes` gains
   `dnsdist_candidate`, `dnsdist_available jsonb ('[]')`, `dnsdist_repo_series`,
   `inventory_at`, `last_upgrade jsonb` (`api.UpgradeResult`). `upgrade_runs(id, kind
-  'dnsdist'|'agent', target_version, status 'running'|'paused'|'done'|'failed'|'aborted',
+  'dnsdist'|'agent'|'config' (§6.5), target_version, profile_id (config), status 'running'|'paused'|'done'|'failed'|'aborted',
   created_by, created_at, finished_at, message)` with a unique partial index allowing at
   most one `running`/`paused` run; `upgrade_run_steps(run_id, position, node_id, status
   'pending'|'running'|'ok'|'failed'|'skipped', started_at, finished_at, message,

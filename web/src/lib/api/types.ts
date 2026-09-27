@@ -28,8 +28,8 @@ export interface Listen {
   tls: TLS
 }
 
-export type ServerPolicy = 'whashed' | 'wrandom' | 'leastOutstanding' | 'roundrobin' | 'firstAvailable'
-export const POLICIES: ServerPolicy[] = ['whashed', 'wrandom', 'leastOutstanding', 'roundrobin', 'firstAvailable']
+export type ServerPolicy = 'whashed' | 'whashedLatency' | 'wrandom' | 'leastOutstanding' | 'roundrobin' | 'firstAvailable'
+export const POLICIES: ServerPolicy[] = ['whashed', 'whashedLatency', 'wrandom', 'leastOutstanding', 'roundrobin', 'firstAvailable']
 export interface Upstream {
   address: string
   weight: number
@@ -41,6 +41,8 @@ export interface Upstreams {
   policy: ServerPolicy
   servers: Upstream[]
   health_check_interval_s: number
+  /** whashedLatency only: upstreams faster than this count as equally fast (0 = 20 ms). */
+  latency_floor_ms: number
 }
 
 export interface Cache {
@@ -735,8 +737,10 @@ export interface UpgradeRunStep {
 
 export interface UpgradeRun {
   id: number
-  kind: UpgradeKind
+  /** config = a staged profile publish (target_version is the profile version). */
+  kind: UpgradeKind | 'config'
   target_version: string
+  profile_id: string | null
   status: UpgradeRunStatus
   created_by: string | null
   created_at: string

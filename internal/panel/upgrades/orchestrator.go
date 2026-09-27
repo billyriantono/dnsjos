@@ -16,6 +16,7 @@ type run struct {
 	id           int64
 	kind, target string
 	createdBy    *string
+	profileID    *string // config runs
 }
 
 // step is the current step of a run joined with its node's latest state.
@@ -25,9 +26,12 @@ type step struct {
 	startedAt                *time.Time
 	nodeID, name, nodeStatus string
 	deleted                  bool
-	version                  string // dnsdist_version or agent_version, per run kind
+	version                  string // dnsdist_version or agent_version, per run kind ("" for config)
 	lastSeen                 *time.Time
 	last                     *api.UpgradeResult
+	fromVersion              string // config: the version the node is pinned back to on failure
+	applied                  *int   // config: applied_config_version
+	applyErr                 string // config: the last heartbeat's apply_error
 }
 
 // tick advances the single running run: at most one node is ever in progress, and the
@@ -35,8 +39,8 @@ type step struct {
 func (s *svc) tick(ctx context.Context) error {
 	return pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
 		var rn run
-		err := tx.QueryRow(ctx, "SELECT id, kind, target_version, created_by FROM upgrade_runs WHERE status = 'running' FOR UPDATE").
-			Scan(&rn.id, &rn.kind, &rn.target, &rn.createdBy)
+		err := tx.QueryRow(ctx, "SELECT id, kind, target_version, created_by, profile_id FROM upgrade_runs WHERE status = 'running' FOR UPDATE").
+			Scan(&rn.id, &rn.kind, &rn.target, &rn.createdBy, &rn.profileID)
 		if db.IsNotFound(err) {
 			return nil
 		}
@@ -47,11 +51,13 @@ func (s *svc) tick(ctx context.Context) error {
 		for {
 			var st step
 			err := tx.QueryRow(ctx, `SELECT s.position, s.status, s.started_at, n.id, n.name, n.status, n.deleted_at IS NOT NULL,
-					CASE WHEN $2 = 'agent' THEN n.agent_version ELSE n.dnsdist_version END, n.last_seen_at, n.last_upgrade
+					CASE $2 WHEN 'agent' THEN n.agent_version WHEN 'config' THEN '' ELSE n.dnsdist_version END,
+					n.last_seen_at, n.last_upgrade, s.from_version, n.applied_config_version,
+					coalesce(n.last_heartbeat->>'apply_error', '')
 				FROM upgrade_run_steps s JOIN nodes n ON n.id = s.node_id
 				WHERE s.run_id = $1 AND s.status IN ('pending', 'running') ORDER BY s.position LIMIT 1`, rn.id, rn.kind).
 				Scan(&st.position, &st.status, &st.startedAt, &st.nodeID, &st.name, &st.nodeStatus, &st.deleted,
-					&st.version, &st.lastSeen, &st.last)
+					&st.version, &st.lastSeen, &st.last, &st.fromVersion, &st.applied, &st.applyErr)
 			if db.IsNotFound(err) {
 				_, err = tx.Exec(ctx, "UPDATE upgrade_runs SET status = 'done', finished_at = $2, message = '' WHERE id = $1", rn.id, now)
 				return err
@@ -70,7 +76,7 @@ func (s *svc) tick(ctx context.Context) error {
 				switch {
 				case st.deleted:
 					err = setStep(api.StepSkipped, "node deleted")
-				case st.version == rn.target:
+				case rn.kind != api.UpgradeConfig && st.version == rn.target:
 					err = setStep(api.StepSkipped, "already at "+rn.target)
 				default:
 					return s.startStep(ctx, tx, rn, st, now)
@@ -100,6 +106,14 @@ func (s *svc) tick(ctx context.Context) error {
 			if err := setStep(api.StepFailed, reason); err != nil {
 				return err
 			}
+			if rn.kind == api.UpgradeConfig { // back to the version it ran before (the agent already rolled back)
+				// Only while it still follows the run's profile: a pin is a version of that profile.
+				if _, err := tx.Exec(ctx, `UPDATE nodes SET config_pin = nullif($2, '')::int WHERE id = $1
+					AND coalesce(profile_id, (SELECT id FROM config_profiles WHERE name = 'default')) = $3`,
+					st.nodeID, st.fromVersion, rn.profileID); err != nil {
+					return err
+				}
+			}
 			return pause(ctx, tx, rn.id, st.name+": "+reason)
 		}
 	})
@@ -121,6 +135,18 @@ func (s *svc) startStep(ctx context.Context, tx pgx.Tx, rn run, st step, now tim
 			return pause(ctx, tx, rn.id, "not starting "+st.name+": "+he.msg)
 		}
 		return err
+	}
+	if rn.kind == api.UpgradeConfig {
+		// Unpinned, the node gets the new version with its next heartbeat ack (≤ 15 s).
+		if _, err := tx.Exec(ctx, "UPDATE nodes SET config_pin = NULL WHERE id = $1", st.nodeID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `UPDATE upgrade_run_steps SET status = 'running', started_at = $3, finished_at = NULL,
+			message = 'config released to the node' WHERE run_id = $1 AND position = $2`, rn.id, st.position, now); err != nil {
+			return err
+		}
+		return audit.Log(ctx, tx, rn.createdBy, "config_rollout.step", "node", st.nodeID,
+			map[string]string{"from_version": st.fromVersion, "to_version": rn.target}, "")
 	}
 	typ, version := api.CmdUpgradeAgent, ""
 	if rn.kind == api.UpgradeDnsdist {
@@ -147,6 +173,9 @@ func (s *svc) gate(ctx context.Context, tx pgx.Tx, rn run, st step, now time.Tim
 	if st.deleted {
 		return "node deleted", true, nil
 	}
+	if rn.kind == api.UpgradeConfig {
+		return s.configGate(ctx, tx, st, now)
+	}
 	// ponytail: "this attempt" compares the node's clock with the panel's; assumes NTP-synced nodes.
 	this := st.last != nil && st.last.Kind == rn.kind && !st.last.At.Before(*st.startedAt)
 	if this && !st.last.OK {
@@ -162,6 +191,32 @@ func (s *svc) gate(ctx context.Context, tx pgx.Tx, rn run, st step, now time.Tim
 	case rn.kind == api.UpgradeAgent: // agent restarts do not touch dnsdist (SPEC §18)
 	case !this:
 		reason = "waiting for the node's upgrade result"
+	default:
+		reason, err = s.qpsGate(ctx, tx, st, now)
+	}
+	return reason, false, err
+}
+
+// configGate: the node applied the config it is now served, is online with a fresh
+// heartbeat, and its traffic came back (an apply restarts dnsdist). The node was online
+// when the step started, so any apply error now is from this version.
+func (s *svc) configGate(ctx context.Context, tx pgx.Tx, st step, now time.Time) (reason string, fatal bool, err error) {
+	if st.applyErr != "" {
+		return "apply failed on the node: " + st.applyErr, true, nil
+	}
+	want, ok, err := s.desired(ctx, tx, st.nodeID)
+	switch {
+	case err != nil:
+		return "", false, err
+	case !ok:
+		return "the node's profile has no published version", true, nil
+	case st.applied == nil || *st.applied != want:
+		reason = fmt.Sprintf("waiting for the node to apply config %d", want)
+	case st.nodeStatus != api.NodeOnline:
+		reason = "node is " + st.nodeStatus
+	case st.lastSeen == nil || !st.lastSeen.After(*st.startedAt) ||
+		now.Sub(*st.lastSeen) > time.Duration(3*s.d.Settings.Get().AgentHeartbeatIntervalS)*time.Second:
+		reason = "no fresh heartbeat"
 	default:
 		reason, err = s.qpsGate(ctx, tx, st, now)
 	}

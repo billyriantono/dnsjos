@@ -59,6 +59,7 @@ type agent struct {
 	seen       int              // its version (sent as ETag)
 	applied    int
 	applyErr   string
+	fetchErr   bool // applyErr came from a 409 on GET /config, not from applying
 	blErr      string
 	wantSHA    string
 	cgkStatus  api.CGKStatus
@@ -197,13 +198,18 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 		var se *client.StatusError
 		if errors.As(err, &se) && se.Code == 409 { // effective config invalid, or no blocklist yet
 			a.mu.Lock()
-			a.applyErr = se.Body
+			a.applyErr, a.fetchErr = se.Body, true
 			a.mu.Unlock()
 		}
 		return
 	}
-	if cfg == nil {
-		return // 304
+	if cfg == nil { // 304: the panel serves the version we run again (e.g. a staged rollout pinned us back)
+		a.mu.Lock()
+		if a.fetchErr {
+			a.applyErr, a.fetchErr = "", false
+		}
+		a.mu.Unlock()
+		return
 	}
 	a.mu.Lock()
 	a.cfg, a.seen = cfg, cfg.Version
@@ -222,11 +228,11 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
-		a.applyErr = fmt.Sprintf("config v%d: %v", cfg.Version, err)
+		a.applyErr, a.fetchErr = fmt.Sprintf("config v%d: %v", cfg.Version, err), false
 		a.o.Log.Error("config apply failed", "version", cfg.Version, "err", err)
 		return
 	}
-	a.applied, a.applyErr = cfg.Version, ""
+	a.applied, a.applyErr, a.fetchErr = cfg.Version, "", false
 	if changed {
 		a.dnsdistVer = dnsdistVersion(ctx, a.run)
 		a.o.Log.Info("config applied", "version", cfg.Version, "profile", cfg.Profile)

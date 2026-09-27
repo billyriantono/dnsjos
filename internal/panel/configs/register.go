@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/panel/audit"
 	"github.com/billyriantono/dnsjos/internal/panel/db"
 	"github.com/billyriantono/dnsjos/internal/panel/httpx"
+	"github.com/billyriantono/dnsjos/internal/panel/upgrades"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
@@ -42,7 +44,9 @@ const profileSelect = `
 	SELECT p.id, p.name, p.description, p.created_at,
 		coalesce((SELECT max(version) FROM config_versions v WHERE v.profile_id = p.id), 0),
 		(SELECT max(version) FROM config_versions v WHERE v.profile_id = p.id AND v.published),
-		(SELECT count(*) FROM nodes n WHERE n.profile_id = p.id AND n.deleted_at IS NULL)
+		-- Nodes without a profile follow "default" (as in Effective and deleteProfile).
+		(SELECT count(*) FROM nodes n WHERE n.deleted_at IS NULL
+			AND (n.profile_id = p.id OR (n.profile_id IS NULL AND p.name = 'default')))
 	FROM config_profiles p`
 
 func scanProfile(row pgx.Row) (api.Profile, error) {
@@ -304,21 +308,44 @@ func (h *handlers) publish(w http.ResponseWriter, r *http.Request) {
 		httpx.NotFound(w)
 		return
 	}
+	// ?staged=true: one node at a time behind the upgrade health gate (SPEC §6.5).
+	staged := r.URL.Query().Get("staged") == "true"
 	var v api.ConfigVersion
+	var runID int64
 	err = pgx.BeginFunc(r.Context(), h.d.Pool, func(tx pgx.Tx) error {
+		ctx := r.Context()
+		if err := tx.QueryRow(ctx, "SELECT 1 FROM config_versions WHERE profile_id = $1 AND version = $2",
+			id, n).Scan(new(int)); err != nil {
+			return err
+		}
 		var err error
-		v, err = scanVersion(tx.QueryRow(r.Context(), `
+		if staged {
+			runID, err = upgrades.StartConfigRollout(ctx, tx, id, n, app.UserIDFrom(ctx), time.Now())
+		} else {
+			err = upgrades.PublishAll(ctx, tx, id)
+		}
+		if err != nil {
+			return err
+		}
+		v, err = scanVersion(tx.QueryRow(ctx, `
 			UPDATE config_versions SET published = true, published_at = coalesce(published_at, now())
 			WHERE profile_id = $1 AND version = $2
 			RETURNING id, profile_id, version, spec, comment, created_by, created_at, published, published_at`, id, n))
 		if err != nil {
 			return err
 		}
-		return audit.Record(r, tx, "config_version.publish", "profile", id, map[string]int{"version": n})
+		detail := map[string]any{"version": n}
+		if runID != 0 {
+			detail["rollout_run"] = runID
+		}
+		return audit.Record(r, tx, "config_version.publish", "profile", id, detail)
 	})
 	if err != nil {
-		httpx.WriteDBError(w, r, err)
+		upgrades.WriteErr(w, r, err)
 		return
+	}
+	if runID != 0 {
+		w.Header().Set("Location", "/api/v1/upgrades/"+strconv.FormatInt(runID, 10))
 	}
 	httpx.WriteJSON(w, http.StatusOK, v)
 }
@@ -372,10 +399,11 @@ var (
 func Effective(ctx context.Context, q db.Querier, nodeID string) (spec api.ConfigSpec, version int, profile string, err error) {
 	var overrides []byte
 	var profileID *string
+	var pin *int
 	// A node without a profile follows "default", exactly like GET /agent/v1/config.
-	err = q.QueryRow(ctx, `SELECT p.id, coalesce(p.name, ''), n.overrides FROM nodes n
+	err = q.QueryRow(ctx, `SELECT p.id, coalesce(p.name, ''), n.overrides, n.config_pin FROM nodes n
 		LEFT JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
-		WHERE n.id = $1 AND n.deleted_at IS NULL`, nodeID).Scan(&profileID, &profile, &overrides)
+		WHERE n.id = $1 AND n.deleted_at IS NULL`, nodeID).Scan(&profileID, &profile, &overrides, &pin)
 	if err != nil {
 		return spec, 0, "", err
 	}
@@ -383,7 +411,7 @@ func Effective(ctx context.Context, q db.Querier, nodeID string) (spec api.Confi
 		return spec, 0, "", ErrNoConfig
 	}
 	err = q.QueryRow(ctx, `SELECT version, spec FROM config_versions WHERE profile_id = $1 AND published
-		ORDER BY version DESC LIMIT 1`, *profileID).Scan(&version, &spec)
+		AND ($2::int IS NULL OR version <= $2) ORDER BY version DESC LIMIT 1`, *profileID, pin).Scan(&version, &spec)
 	if db.IsNotFound(err) {
 		return spec, 0, profile, ErrNoConfig
 	} else if err != nil {

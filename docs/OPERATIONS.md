@@ -103,6 +103,21 @@ systemctl disable dnsjos-agent
 
 Later config changes keep the last five managed-file backups in `/var/lib/dnsjos/backup/`.
 
+## Publishing config changes
+
+Profile → Version history → **Publish**. With more than one node on the profile the dialog
+defaults to **One node at a time**: nodes get the new version least busy first, and the
+next one only after the previous is `online`, reports the new version and its traffic is
+back (the apply restarts dnsdist for a second or two). Follow it on the **Upgrades** page
+(a `config rollout` run).
+
+* A node that fails to apply it rolls back by itself, is returned to the previous version
+  and the rollout pauses. Fix the profile and publish a new version, or **Resume** to retry
+  that node.
+* **Abort** keeps the nodes not reached yet on the previous version. Publishing the same
+  version again without the switch sends it to every node at once.
+* Switch it off for an urgent change that must reach every node within ~15 s.
+
 ## Emergency unblock (allowlist)
 
 When the regulator's list contains something shared — a CDN hostname such as

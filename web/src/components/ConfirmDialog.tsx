@@ -17,6 +17,7 @@ import { Input } from '@/components/ui/input'
  * Confirmation wrapper: `<ConfirmDialog title="Delete node?" onConfirm={…}><Button>Delete</Button></ConfirmDialog>`.
  * The dialog stays open (button disabled) while an async onConfirm is pending.
  * `confirmText` makes it a strong confirm: the user has to type that text first.
+ * `body` renders extra controls (e.g. an option switch) below the description.
  */
 export function ConfirmDialog({
   children,
@@ -25,6 +26,7 @@ export function ConfirmDialog({
   confirmLabel = 'Confirm',
   destructive,
   confirmText,
+  body,
   onConfirm,
 }: {
   children: ReactNode
@@ -33,6 +35,7 @@ export function ConfirmDialog({
   confirmLabel?: string
   destructive?: boolean
   confirmText?: string
+  body?: ReactNode
   onConfirm: () => unknown | Promise<unknown>
 }) {
   const [open, setOpen] = useState(false)
@@ -62,6 +65,7 @@ export function ConfirmDialog({
           <AlertDialogTitle>{title}</AlertDialogTitle>
           {description && <AlertDialogDescription>{description}</AlertDialogDescription>}
         </AlertDialogHeader>
+        {body}
         {confirmText && (
           <label className="grid gap-1.5 text-sm">
             <span>

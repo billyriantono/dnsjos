@@ -12,6 +12,9 @@ import (
 const (
 	UpgradeDnsdist = "dnsdist"
 	UpgradeAgent   = "agent"
+	// UpgradeConfig runs are staged profile publishes (SPEC §6.5), created by
+	// POST /profiles/{id}/versions/{v}/publish?staged=true, never by POST /upgrades.
+	UpgradeConfig = "config"
 )
 
 var UpgradeKinds = []string{UpgradeDnsdist, UpgradeAgent}
@@ -62,7 +65,8 @@ func (r CommandRequest) Validate(available, supportedSeries []string) error {
 type UpgradeRun struct {
 	ID            int64            `json:"id"`
 	Kind          string           `json:"kind"`
-	TargetVersion string           `json:"target_version"`
+	TargetVersion string           `json:"target_version"` // config: the profile version
+	ProfileID     *string          `json:"profile_id"`     // config runs only
 	Status        string           `json:"status"`
 	CreatedBy     *string          `json:"created_by"`
 	CreatedAt     time.Time        `json:"created_at"`

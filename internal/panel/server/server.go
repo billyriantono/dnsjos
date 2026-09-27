@@ -119,7 +119,7 @@ func Handler(d *app.Deps) http.Handler {
 	blocklist.Register(r, d)
 	reports.Register(r, d)
 	analytics.Register(r, d)
-	upgrades.Register(r, d)
+	upgrades.Register(r, d, nodes.DesiredConfigVersion)
 	name := cmp.Or(d.Cfg.BrandName, "DnsJos")
 	registerBranding(r, brand{name, d.Cfg.BrandTagline, d.Cfg.BrandDir})
 	r.Public("/", spaHandler(name))

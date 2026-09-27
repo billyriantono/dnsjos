@@ -35,6 +35,7 @@ func effectiveConfig(ctx context.Context, q db.Querier, nodeID string) (e effect
 		FROM nodes n
 		JOIN config_profiles p ON p.id = coalesce(n.profile_id, (SELECT id FROM config_profiles WHERE name = 'default'))
 		JOIN LATERAL (SELECT version, spec FROM config_versions WHERE profile_id = p.id AND published
+		              AND (n.config_pin IS NULL OR version <= n.config_pin) -- staged rollout (SPEC §6.5)
 		              ORDER BY version DESC LIMIT 1) v ON true
 		WHERE n.id = $1`, nodeID).Scan(&e.profile, &v, &e.spec, &e.over, &key)
 	if db.IsNotFound(err) {
@@ -42,6 +43,13 @@ func effectiveConfig(ctx context.Context, q db.Querier, nodeID string) (e effect
 	}
 	e.version = configVersion(v, key, e.over)
 	return e, err == nil, err
+}
+
+// DesiredConfigVersion is the config version the node should report as applied
+// (AgentConfig.version); ok is false when its profile has nothing published.
+func DesiredConfigVersion(ctx context.Context, q db.Querier, nodeID string) (version int, ok bool, err error) {
+	e, ok, err := effectiveConfig(ctx, q, nodeID)
+	return e.version, ok, err
 }
 
 func (s *svc) config(w http.ResponseWriter, r *http.Request) {

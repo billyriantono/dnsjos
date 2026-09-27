@@ -26,11 +26,17 @@ type svc struct {
 	d       *app.Deps
 	now     func() time.Time
 	timeout time.Duration // health gate per node
+	desired DesiredFunc
 }
 
+// DesiredFunc returns the config version a node should report as applied (ok false: its
+// profile has nothing published) — nodes.DesiredConfigVersion, injected because nodes'
+// tests import configs, which imports this package.
+type DesiredFunc func(ctx context.Context, q db.Querier, nodeID string) (version int, ok bool, err error)
+
 // Register mounts the upgrade and meta routes and the orchestrator job.
-func Register(r *app.Router, d *app.Deps) {
-	s := &svc{d: d, now: time.Now, timeout: 10 * time.Minute}
+func Register(r *app.Router, d *app.Deps, desired DesiredFunc) {
+	s := &svc{d: d, now: time.Now, timeout: 10 * time.Minute, desired: desired}
 	s.mount(r)
 	if d.Jobs != nil {
 		d.Jobs.Every("upgrades", 5*time.Second, s.tick)
@@ -70,14 +76,14 @@ func writeErr(w http.ResponseWriter, r *http.Request, err error) {
 	}
 }
 
-const runCols = "id, kind, target_version, status, created_by, created_at, finished_at, message"
+const runCols = "id, kind, target_version, profile_id, status, created_by, created_at, finished_at, message"
 
 // loadRuns returns runs (newest first) with their ordered steps.
 func loadRuns(ctx context.Context, q db.Querier, where string, args ...any) ([]api.UpgradeRun, error) {
 	rows, _ := q.Query(ctx, "SELECT "+runCols+" FROM upgrade_runs "+where+" ORDER BY id DESC LIMIT 100", args...)
 	runs, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (api.UpgradeRun, error) {
 		u := api.UpgradeRun{Steps: []api.UpgradeRunStep{}}
-		err := row.Scan(&u.ID, &u.Kind, &u.TargetVersion, &u.Status, &u.CreatedBy, &u.CreatedAt, &u.FinishedAt, &u.Message)
+		err := row.Scan(&u.ID, &u.Kind, &u.TargetVersion, &u.ProfileID, &u.Status, &u.CreatedBy, &u.CreatedAt, &u.FinishedAt, &u.Message)
 		return u, err
 	})
 	if err != nil || len(runs) == 0 {
@@ -320,7 +326,11 @@ func (s *svc) action(w http.ResponseWriter, r *http.Request) {
 				WHERE run_id = $1 AND status IN ('pending', 'running')`, id, now); err != nil {
 				return err
 			}
-			if _, err := tx.Exec(ctx, "UPDATE upgrade_runs SET status = 'aborted', finished_at = $2, message = 'aborted by an admin' WHERE id = $1", id, now); err != nil {
+			// A config run leaves the nodes it did not reach pinned to their old version until the
+			// profile is published again.
+			if _, err := tx.Exec(ctx, `UPDATE upgrade_runs SET status = 'aborted', finished_at = $2,
+				message = CASE WHEN kind = 'config' THEN 'aborted by an admin: nodes not reached stay on their previous config until the profile is published again'
+				ELSE 'aborted by an admin' END WHERE id = $1`, id, now); err != nil {
 				return err
 			}
 		}

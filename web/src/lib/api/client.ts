@@ -163,7 +163,8 @@ export const api = {
     version: (id: string, v: number) => get<ConfigVersion>(`${V1}/profiles/${id}/versions/${v}`),
     createVersion: (id: string, spec: ConfigSpec, comment: string) =>
       post<ConfigVersion>(`${V1}/profiles/${id}/versions`, { spec, comment }),
-    publish: (id: string, v: number) => post<ConfigVersion>(`${V1}/profiles/${id}/versions/${v}/publish`),
+    publish: (id: string, v: number, staged = false) =>
+      post<ConfigVersion>(`${V1}/profiles/${id}/versions/${v}/publish${staged ? '?staged=true' : ''}`),
     diff: (id: string, a: number, b: number) => get<ConfigVersionDiff>(`${V1}/profiles/${id}/versions/${a}/diff/${b}`),
     preview: (id: string, spec: ConfigSpec) => post<RenderedConfig>(`${V1}/profiles/${id}/preview`, { spec }),
   },
@@ -389,7 +390,10 @@ export const useCreateVersion = () =>
     () => [qk.profiles],
   )
 export const usePublishVersion = () =>
-  useMut((a: { id: string; version: number }) => api.profiles.publish(a.id, a.version), () => [qk.profiles, qk.nodes])
+  useMut(
+    (a: { id: string; version: number; staged?: boolean }) => api.profiles.publish(a.id, a.version, a.staged),
+    () => [qk.profiles, qk.nodes, qk.upgrades],
+  )
 
 export const useCreateSource = () => useMut(api.blocklist.createSource, () => [qk.blocklistSources])
 export const useUpdateSource = () =>

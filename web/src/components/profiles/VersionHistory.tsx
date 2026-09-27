@@ -1,4 +1,6 @@
+import { useState } from 'react'
 import { LuGitCompareArrows, LuHistory, LuRocket, LuUndo2 } from 'react-icons/lu'
+import { useNavigate } from 'react-router'
 import { toast } from 'sonner'
 
 import { RequireAdmin } from '@/app/auth'
@@ -9,6 +11,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { useCreateVersion, usePublishVersion } from '@/lib/api/client'
 import type { ConfigVersion } from '@/lib/api/types'
@@ -38,15 +41,22 @@ export function VersionHistory({
 }) {
   const publish = usePublishVersion()
   const create = useCreateVersion()
+  const navigate = useNavigate()
+  // One node at a time behind the upgrade health gate; pointless with a single node.
+  const [staged, setStaged] = useState(true)
+  const stage = staged && nodeCount > 1 && liveVersion !== null
   const doPublish = async (v: ConfigVersion) => {
     try {
       let target = v.version
       if (liveVersion !== null && needsRollForward(v.version, liveVersion)) {
         target = (await create.mutateAsync({ id: profileId, spec: v.spec, comment: rollbackComment(v.version, liveVersion) })).version
       }
-      await publish.mutateAsync({ id: profileId, version: target })
+      await publish.mutateAsync({ id: profileId, version: target, staged: stage })
       toast.success(target === v.version ? `v${v.version} published` : `v${v.version} republished as v${target}`, {
-        description: `${nodeCount} node(s) will pick it up on their next poll.`,
+        description: stage
+          ? `Rolling out one node at a time; each must be healthy on it before the next.`
+          : `${nodeCount} node(s) will pick it up on their next poll.`,
+        action: stage ? { label: 'Watch', onClick: () => navigate('/upgrades') } : undefined,
       })
     } catch (e) {
       toast.error(`Publish failed: ${e instanceof Error ? e.message : String(e)}`)
@@ -116,16 +126,27 @@ export function VersionHistory({
                           title={`Publish v${v.version}?`}
                           description={
                             <>
-                              {nodeCount > 0
-                                ? `${nodeCount} node(s) on this profile will apply it on their next poll. `
-                                : 'No nodes use this profile yet. '}
+                              {nodeCount === 0
+                                ? 'No nodes use this profile yet. '
+                                : stage
+                                  ? `The ${nodeCount} nodes on this profile get it one at a time, least busy first; the next only after the previous is online, healthy and back to its traffic. A failure pauses the rollout and returns that node to v${liveVersion}. `
+                                  : `${nodeCount} node(s) on this profile will apply it on their next poll. `}
                               {liveVersion !== null &&
                                 needsRollForward(v.version, liveVersion) &&
                                 `This rolls back from v${liveVersion} by publishing a copy of v${v.version} as a new version. `}
                               A node that fails to load the config rolls back and reports the error.
                             </>
                           }
-                          confirmLabel="Publish"
+                          body={
+                            nodeCount > 1 &&
+                            liveVersion !== null && (
+                              <label className="flex items-center gap-2 text-sm">
+                                <Switch checked={staged} onCheckedChange={setStaged} />
+                                One node at a time
+                              </label>
+                            )
+                          }
+                          confirmLabel={stage ? 'Start rollout' : 'Publish'}
                           onConfirm={() => doPublish(v)}
                         >
                           <Button variant="ghost" size="sm" className="h-7 px-2 text-xs text-primary">

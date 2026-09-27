@@ -17,6 +17,7 @@ import (
 
 	"github.com/billyriantono/dnsjos/internal/panel/app"
 	"github.com/billyriantono/dnsjos/internal/panel/db/dbtest"
+	"github.com/billyriantono/dnsjos/internal/panel/nodes"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
 
@@ -37,7 +38,7 @@ func setup(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	e := &env{t: t, pool: pool, cookie: app.NewToken(), now: time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)}
-	e.s = &svc{d: d, now: func() time.Time { return e.now }, timeout: 10 * time.Minute}
+	e.s = &svc{d: d, now: func() time.Time { return e.now }, timeout: 10 * time.Minute, desired: nodes.DesiredConfigVersion}
 	e.run(`WITH u AS (INSERT INTO users (email, password_hash, role) VALUES ('a@example.com', 'x', 'admin') RETURNING id)
 		INSERT INTO sessions (id_hash, user_id, expires_at) SELECT $1, id, now() + interval '1 hour' FROM u`, app.HashToken(e.cookie))
 	r := app.NewRouter(d)
