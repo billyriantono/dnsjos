@@ -179,9 +179,12 @@ func DefaultConfigSpec() ConfigSpec {
 			RewritePools: []string{
 				"104.20.0.0/16", "104.21.0.0/16", "104.24.0.0/16", "104.25.0.0/16",
 				"104.26.0.0/16", "104.27.0.0/16", "172.66.0.0/16", "172.67.0.0/16", "188.114.96.0/20",
+				// IPv6 shared pools (SPEC §6.7); only rewritten on nodes that measured IPv6.
+				"2606:4700:3030::/44", "2606:4700:10::/48", "2606:4700:20::/48",
 			},
-			AliasPools: []string{"104.16.0.0/16", "104.17.0.0/16", "104.18.0.0/16", "104.19.0.0/16", "172.64.0.0/16"},
-			TestSites:  []string{"kincir.com", "suara.com", "jagoanhosting.com", "dewaweb.com"},
+			AliasPools: []string{"104.16.0.0/16", "104.17.0.0/16", "104.18.0.0/16", "104.19.0.0/16", "172.64.0.0/16",
+				"2606:4700::6810:0/110"}, // = 104.16.0.0/14 in Cloudflare's IPv6 space, served from CGK
+			TestSites: []string{"kincir.com", "suara.com", "jagoanhosting.com", "dewaweb.com"},
 			Exclude: []string{
 				"argotunnel.com", "cftunnel.com", "api.cloudflare.com", "cloudflareaccess.com",
 				"cloudflareresearch.com", "acme-v02.api.letsencrypt.org", "engage.cloudflareclient.com",

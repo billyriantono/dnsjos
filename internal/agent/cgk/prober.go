@@ -20,22 +20,28 @@ type NetProber struct {
 	Resolver string // default 1.1.1.1:53
 }
 
+// Resolve returns the A records of name, then its AAAA records.
 func (p NetProber) Resolve(ctx context.Context, name string) []string {
 	srv := p.Resolver
 	if srv == "" {
 		srv = "1.1.1.1:53"
 	}
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), dns.TypeA)
-	c := &dns.Client{Timeout: 3 * time.Second}
-	r, _, err := c.ExchangeContext(ctx, m, srv)
-	if err != nil {
-		return nil
-	}
 	var out []string
-	for _, rr := range r.Answer {
-		if a, ok := rr.(*dns.A); ok {
-			out = append(out, a.A.String())
+	for _, t := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		m := new(dns.Msg)
+		m.SetQuestion(dns.Fqdn(name), t)
+		c := &dns.Client{Timeout: 3 * time.Second}
+		r, _, err := c.ExchangeContext(ctx, m, srv)
+		if err != nil {
+			continue
+		}
+		for _, rr := range r.Answer {
+			switch a := rr.(type) {
+			case *dns.A:
+				out = append(out, a.A.String())
+			case *dns.AAAA:
+				out = append(out, a.AAAA.String())
+			}
 		}
 	}
 	return out

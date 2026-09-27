@@ -509,7 +509,7 @@ func (s *svc) cgk(w http.ResponseWriter, r *http.Request) {
 		httpx.BadRequest(w, err.Error())
 		return
 	}
-	if len(c.Aliases) > 4096 || len(c.RewriteRanges) > 4096 || len(c.Pools) > 4096 {
+	if len(c.Aliases) > 4096 || len(c.Aliases6) > 4096 || len(c.RewriteRanges) > 4096 || len(c.Pools) > 4096 {
 		httpx.BadRequest(w, "too many aliases, rewrite ranges or pools")
 		return
 	}
@@ -523,9 +523,10 @@ func (s *svc) cgk(w http.ResponseWriter, r *http.Request) {
 		return v
 	}
 	err := pgx.BeginFunc(ctx, s.d.Pool, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO cgk_reports (node_id, measured_at, ok, message, aliases, rewrite_ranges, pools)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)`, id, c.MeasuredAt, c.OK, clip(c.Message, 4000),
-			orEmpty(c.Aliases, len(c.Aliases)), orEmpty(c.RewriteRanges, len(c.RewriteRanges)), orEmpty(c.Pools, len(c.Pools))); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO cgk_reports (node_id, measured_at, ok, message, aliases, aliases6, ipv6, rewrite_ranges, pools)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`, id, c.MeasuredAt, c.OK, clip(c.Message, 4000),
+			orEmpty(c.Aliases, len(c.Aliases)), orEmpty(c.Aliases6, len(c.Aliases6)), clip(c.IPv6, 32),
+			orEmpty(c.RewriteRanges, len(c.RewriteRanges)), orEmpty(c.Pools, len(c.Pools))); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `DELETE FROM cgk_reports WHERE node_id = $1 AND id NOT IN (

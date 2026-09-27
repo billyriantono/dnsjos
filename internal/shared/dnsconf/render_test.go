@@ -231,7 +231,7 @@ func TestCheckConfig(t *testing.T) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Cache.Enabled, s.Analytics.Enabled = false, false, false, false, false
 		},
 		"analytics_sampled": func(s *api.ConfigSpec) { s.Analytics.SampleRate = 7 },
-		"whashed_no_stale": func(s *api.ConfigSpec) { s.Upstreams.Policy, s.Cache.StaleTTL = "whashed", 0 },
+		"whashed_no_stale":  func(s *api.ConfigSpec) { s.Upstreams.Policy, s.Cache.StaleTTL = "whashed", 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()

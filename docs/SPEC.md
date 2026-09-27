@@ -411,6 +411,31 @@ names it finds broken by itself:
   apart by an HTTP check (DNS never tells which port the client will use); keep such names
   in `cgk.exclude`.
 
+### 6.7 CGK over IPv6
+
+Cloudflare serves its shared IPv6 ranges from other colos than the matching IPv4 ones
+(measured 2026-09 from an Indonesian network: most of `2606:4700:3030::/44`,
+`2606:4700:10::/48` and `2606:4700:20::/48` from SIN), and clients prefer IPv6. So
+`cgk.rewrite_pools` and `cgk.alias_pools` may hold IPv6 prefixes, and AAAA answers are
+rewritten like A answers:
+
+* The prober handles each family separately. IPv6 samples cannot be random host bits
+  (mostly unbound): for prefixes up to /96 a sample is the prefix plus a random address of
+  104.16.0.0/12 or 172.64.0.0/13 in the low 32 bits, which is how Cloudflare numbers its IPv6
+  edge (`2606:4700:3033::6815:3764` ↔ 104.21.55.100); longer prefixes get random host bits.
+  Test-site AAAA records inside a pool are evidence, as for IPv4. The default IPv6 alias pool
+  `2606:4700::6810:0/110` is 104.16.0.0/14 in that numbering, served from CGK.
+* The IPv6 half never fails a refresh. `CGKReport.ipv6` (and `cgk_reports.ipv6`, migration
+  `0010`) is `ok`, `not_configured` (no IPv6 pools), `no_connectivity` (no IPv6 sample
+  answered: the node has no IPv6) or `too_few_aliases` (< `min_ok`). Only with `ok` are the
+  IPv6 aliases written (`dnsjos/cgk-aliases6.txt`) and the IPv6 pools added to the rewrite
+  list; otherwise AAAA answers keep their real addresses.
+* IPv6 prefixes are never part of the Lua fallback (`DEFAULT_REWRITE`): a node rewrites AAAA
+  only after it measured IPv6 itself.
+* `cgk.lua` rewrites AAAA records (16-byte rdata) inside the rewrite ranges to
+  `alias6Bytes`, stable per name like IPv4; `cgkSeen()` reports IPv6 pairs too, so exclusion
+  learning (§6.6) covers IPv6 on nodes that have it.
+
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 
 ### 7.1 Sources

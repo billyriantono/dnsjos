@@ -167,6 +167,8 @@ export interface DynBlock {
 
 export interface CGKStatus {
   aliases: number
+  /** Absent from agents older than IPv6 CGK support. */
+  aliases6?: number
   rewrite_ranges: number
   last_refresh?: string
   last_error: string
@@ -259,9 +261,13 @@ export interface CGKLearnedReport {
   /** Zero time before the first report. */
   at: string
 }
+/** SPEC §6.7: IPv6 half of a CGK measurement; "" from agents without IPv6 support. */
+export type CGKIPv6 = 'ok' | 'not_configured' | 'no_connectivity' | 'too_few_aliases' | ''
 export interface CGKReport {
   measured_at: string
   aliases: string[]
+  aliases6: string[]
+  ipv6: CGKIPv6
   rewrite_ranges: string[]
   pools: CGKPool[]
   ok: boolean

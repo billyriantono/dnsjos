@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button'
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useNodeCGK, useNodeCGKLearned, useNodeCommand } from '@/lib/api/client'
-import type { CGKLearned, NodeLive } from '@/lib/api/types'
+import type { CGKIPv6, CGKLearned, NodeLive } from '@/lib/api/types'
 
 import { Fact } from './NodeOverviewTab'
 
@@ -33,7 +33,7 @@ export function NodeCGKTab({ id, live }: { id: string; live: NodeLive | undefine
   const st = live?.heartbeat?.cgk
   const d = report.data
   // Go agents encode empty slices as null.
-  const r = d && { ...d, aliases: d.aliases ?? [], rewrite_ranges: d.rewrite_ranges ?? [], pools: d.pools ?? [] }
+  const r = d && { ...d, aliases: d.aliases ?? [], aliases6: d.aliases6 ?? [], rewrite_ranges: d.rewrite_ranges ?? [], pools: d.pools ?? [] }
 
   const refresh = () =>
     cmd.mutate(
@@ -61,7 +61,7 @@ export function NodeCGKTab({ id, live }: { id: string; live: NodeLive | undefine
           </CardAction>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 px-4 text-sm sm:grid-cols-4">
-          <Fact label="Aliases active" value={st?.aliases ?? '—'} />
+          <Fact label="Aliases active" value={st ? `${st.aliases}${st.aliases6 ? ` + ${st.aliases6} IPv6` : ''}` : '—'} />
           <Fact label="Rewrite ranges" value={st?.rewrite_ranges ?? '—'} />
           <Fact label="Last refresh" value={<TimeAgo date={st?.last_refresh ?? r?.measured_at} />} />
           <Fact label="Last result" value={r ? <StatusBadge status={r.ok ? 'ok' : 'failed'} /> : '—'} />
@@ -95,6 +95,17 @@ export function NodeCGKTab({ id, live }: { id: string; live: NodeLive | undefine
           </Card>
           <Card className="gap-3 py-4">
             <CardHeader className="px-4">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                IPv6 aliases ({r.aliases6.length}) <IPv6Badge status={r.ipv6} />
+              </CardTitle>
+              <CardDescription className="text-xs">{IPV6_TEXT[r.ipv6 || '']}</CardDescription>
+            </CardHeader>
+            <CardContent className="px-4">
+              <Chips items={r.aliases6} empty="AAAA answers are not rewritten on this node." />
+            </CardContent>
+          </Card>
+          <Card className="gap-3 py-4">
+            <CardHeader className="px-4">
               <CardTitle className="text-sm">Rewrite ranges ({r.rewrite_ranges.length})</CardTitle>
               <CardDescription className="text-xs">Pools served outside CGK from this node: their answers are rewritten.</CardDescription>
             </CardHeader>
@@ -123,6 +134,20 @@ export function NodeCGKTab({ id, live }: { id: string; live: NodeLive | undefine
       <LearnedExclusions id={id} />
     </div>
   )
+}
+
+const IPV6_TEXT: Record<CGKIPv6, string> = {
+  ok: 'AAAA answers in Cloudflare IPv6 ranges served outside CGK are rewritten to these addresses.',
+  no_connectivity: 'This node has no IPv6 connectivity, so it cannot measure Cloudflare over IPv6. AAAA answers keep their real addresses until the node gets IPv6.',
+  too_few_aliases: 'Too few IPv6 addresses were served from CGK and answered like the real sites; AAAA answers are not rewritten.',
+  not_configured: 'The profile has no IPv6 rewrite or alias pools.',
+  '': 'This agent predates IPv6 CGK support.',
+}
+
+function IPv6Badge({ status }: { status: CGKIPv6 }) {
+  if (status === 'ok') return <Badge className="bg-success/15 text-success">IPv6 on</Badge>
+  if (status === 'no_connectivity') return <Badge variant="outline" className="border-warning/40 text-warning">no IPv6 on node</Badge>
+  return <Badge variant="outline">IPv6 off</Badge>
 }
 
 const code = (c: string) => (c === '000' ? 'no HTTPS' : c)

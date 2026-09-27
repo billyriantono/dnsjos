@@ -275,9 +275,17 @@ var fallbackAliases = []string{
 }
 
 func renderCGK(g api.CGK, rt api.NodeRuntime) ([]byte, error) {
-	rewrite, err := prefixes(g.RewritePools)
+	all, err := prefixes(g.RewritePools)
 	if err != nil {
 		return nil, fmt.Errorf("cgk.rewrite_pools: %w", err)
+	}
+	// IPv6 ranges are never a fallback: AAAA answers are only rewritten once the agent has
+	// measured IPv6 from this node and written its IPv6 aliases.
+	var rewrite []string
+	for _, p := range all {
+		if netip.MustParsePrefix(p).Addr().Is4() {
+			rewrite = append(rewrite, p)
+		}
 	}
 	pools, err := prefixes(g.AliasPools)
 	if err != nil {
@@ -306,13 +314,15 @@ func renderCGK(g api.CGK, rt api.NodeRuntime) ([]byte, error) {
 -- below are only the fallback when a file is missing. LEARNED_FILE lists names the agent
 -- found broken through an alias (Spectrum, IP-bound apps): those are never rewritten.
 local ALIAS_FILE = %s
+local ALIAS6_FILE = %s
 local REWRITE_FILE = %s
 local LEARNED_FILE = %s
 local DEFAULT_REWRITE = %s
 local DEFAULT_ALIASES = %s
 local EXCLUDE = %s
-`, luaString(path.Join(rt.BaseDir, FileCGKAliases)), luaString(path.Join(rt.BaseDir, FileCGKRewrite)),
-		luaString(path.Join(rt.BaseDir, FileCGKLearned)), luaList(rewrite), luaList(aliases), luaList(exclude))
+`, luaString(path.Join(rt.BaseDir, FileCGKAliases)), luaString(path.Join(rt.BaseDir, FileCGKAliases6)),
+		luaString(path.Join(rt.BaseDir, FileCGKRewrite)), luaString(path.Join(rt.BaseDir, FileCGKLearned)),
+		luaList(rewrite), luaList(aliases), luaList(exclude))
 	s.WriteString(`
 declareMetric("cgk-rewrites", "counter", "DNS answers rewritten to Cloudflare CGK aliases")
 declareMetric("cgk-aliases", "gauge", "Cloudflare CGK alias IPs currently in use")
@@ -323,11 +333,50 @@ declareMetric("cgk-rewrite-ranges", "gauge", "Cloudflare ranges currently rewrit
 `)
 	s.WriteString(readListLua)
 	s.WriteString(`
-local rewriteNMG, aliasBytes, learned = newNMG(), {}, {}
+-- parse6 turns an IPv6 address into its 16 bytes (nil when malformed).
+local function parse6(s)
+  local function split(x)
+    local t = {}
+    for g in x:gmatch("[^:]+") do t[#t + 1] = g end
+    return t
+  end
+  local groups
+  local head, tail = s:match("^([%x:]-)::([%x:]*)$")
+  if head then
+    local h, t = split(head), split(tail)
+    if #h + #t > 7 then return nil end
+    groups = h
+    for _ = 1, 8 - #h - #t do groups[#groups + 1] = "0" end
+    for _, g in ipairs(t) do groups[#groups + 1] = g end
+  else
+    groups = split(s)
+  end
+  if #groups ~= 8 then return nil end
+  local b = {}
+  for _, g in ipairs(groups) do
+    if #g > 4 or not g:match("^%x+$") then return nil end
+    local v = tonumber(g, 16)
+    b[#b + 1] = string.char(math.floor(v / 256), v % 256)
+  end
+  return table.concat(b)
+end
+
+-- ip6str formats the 16 bytes of p starting at i (uncompressed, for newCA and logs).
+local function ip6str(p, i)
+  local g = {}
+  for k = 0, 7 do g[#g + 1] = string.format("%x", p:byte(i + 2 * k) * 256 + p:byte(i + 2 * k + 1)) end
+  return table.concat(g, ":")
+end
+
+local rewriteNMG, aliasBytes, alias6Bytes, learned = newNMG(), {}, {}, {}
 
 -- (Re)load the lists; called by the agent over the console: cgkReload()
 function cgkReload()
-  local nmg, bytes, skip = newNMG(), {}, {}
+  local nmg, bytes, bytes6, skip = newNMG(), {}, {}, {}
+  for _, ip in ipairs(readList(ALIAS6_FILE, {}, true)) do
+    local b = parse6(ip)
+    if b then bytes6[#bytes6 + 1] = b end
+  end
   local names = readList(LEARNED_FILE, {}, true)
   for _, n in ipairs(names) do skip[n:lower()] = true end
   learned = skip
@@ -338,10 +387,10 @@ function cgkReload()
     if a then bytes[#bytes + 1] = string.char(tonumber(a), tonumber(b), tonumber(c), tonumber(d)) end
   end
   if #bytes == 0 then return "cgk: no valid aliases, keeping previous lists" end
-  rewriteNMG, aliasBytes = nmg, bytes
-  setMetric("cgk-aliases", #bytes)
+  rewriteNMG, aliasBytes, alias6Bytes = nmg, bytes, bytes6
+  setMetric("cgk-aliases", #bytes + #bytes6)
   setMetric("cgk-rewrite-ranges", #ranges)
-  return string.format("cgk: %d aliases, %d rewrite ranges, %d learned exclusions", #bytes, #ranges, #names)
+  return string.format("cgk: %d aliases, %d IPv6 aliases, %d rewrite ranges, %d learned exclusions", #bytes, #bytes6, #ranges, #names)
 end
 cgkReload()
 
@@ -384,8 +433,8 @@ local function cgkRewrite(dr)
     return DNSResponseAction.None, ""
   end
   for i = 1, #s do h = (h * 31 + s:byte(i)) % 2147483647 end
-  local nmg, aliases = rewriteNMG, aliasBytes
-  if #aliases == 0 then return DNSResponseAction.None, "" end
+  local nmg, aliases, aliases6 = rewriteNMG, aliasBytes, alias6Bytes
+  if #aliases == 0 and #aliases6 == 0 then return DNSResponseAction.None, "" end
   local edits, k, realIP = {}, 0, nil
   for _ = 1, an do
     pos = skipName(p, pos)
@@ -393,11 +442,18 @@ local function cgkRewrite(dr)
     local rtype = p:byte(pos) * 256 + p:byte(pos + 1)
     local rdlen = p:byte(pos + 8) * 256 + p:byte(pos + 9)
     local rd = pos + 10
-    if rtype == 1 and rdlen == 4 and rd + 3 <= #p then
+    if rtype == 1 and rdlen == 4 and rd + 3 <= #p and #aliases > 0 then
       local ip = string.format("%d.%d.%d.%d", p:byte(rd, rd + 3))
       if nmg:match(newCA(ip)) then
         realIP = realIP or ip
         edits[#edits + 1] = { rd, aliases[((h + k) % #aliases) + 1] }
+        k = k + 1
+      end
+    elseif rtype == 28 and rdlen == 16 and rd + 15 <= #p and #aliases6 > 0 then
+      local ip = ip6str(p, rd)
+      if nmg:match(newCA(ip)) then
+        realIP = realIP or ip
+        edits[#edits + 1] = { rd, aliases6[((h + k) % #aliases6) + 1] }
         k = k + 1
       end
     end
@@ -408,7 +464,7 @@ local function cgkRewrite(dr)
   for _, e in ipairs(edits) do
     out[#out + 1] = p:sub(last, e[1] - 1)
     out[#out + 1] = e[2]
-    last = e[1] + 4
+    last = e[1] + #e[2]
   end
   out[#out + 1] = p:sub(last)
   dr:setContent(table.concat(out))
@@ -417,13 +473,15 @@ local function cgkRewrite(dr)
   if e then
     e[3] = e[3] + 1
   elseif seenN < SEEN_MAX then
-    seen[name] = { realIP, string.format("%d.%d.%d.%d", edits[1][2]:byte(1, 4)), 1 }
+    local a = edits[1][2]
+    seen[name] = { realIP, #a == 4 and string.format("%d.%d.%d.%d", a:byte(1, 4)) or ip6str(a, 1), 1 }
     seenN = seenN + 1
   end
   return DNSResponseAction.None, ""
 end
 
-addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), QTypeRule(DNSQType.A), NotRule(SuffixMatchNodeRule(excludeSMN, true))}),
+addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), OrRule({QTypeRule(DNSQType.A), QTypeRule(DNSQType.AAAA)}),
+                          NotRule(SuffixMatchNodeRule(excludeSMN, true))}),
                   LuaResponseAction(cgkRewrite), {name = "cloudflare-cgk"})
 `)
 	return []byte(s.String()), nil

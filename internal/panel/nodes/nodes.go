@@ -387,9 +387,9 @@ func (s *svc) cgkLatest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var c api.CGKReport
-	err := s.d.Pool.QueryRow(ctx, `SELECT measured_at, ok, message, aliases, rewrite_ranges, pools FROM cgk_reports
+	err := s.d.Pool.QueryRow(ctx, `SELECT measured_at, ok, message, aliases, aliases6, ipv6, rewrite_ranges, pools FROM cgk_reports
 		WHERE node_id = $1 ORDER BY measured_at DESC, id DESC LIMIT 1`, id).
-		Scan(&c.MeasuredAt, &c.OK, &c.Message, &c.Aliases, &c.RewriteRanges, &c.Pools)
+		Scan(&c.MeasuredAt, &c.OK, &c.Message, &c.Aliases, &c.Aliases6, &c.IPv6, &c.RewriteRanges, &c.Pools)
 	switch {
 	case db.IsNotFound(err):
 		httpx.WriteJSON(w, http.StatusOK, nil)

@@ -534,10 +534,14 @@ func (a *agent) cgkPaths() (aliases, rewrite string) {
 	return filepath.Join(d, dnsconf.FileCGKAliases), filepath.Join(d, dnsconf.FileCGKRewrite)
 }
 
+func (a *agent) cgkAliases6Path() string {
+	return filepath.Join(a.o.path(DnsdistDir), dnsconf.FileCGKAliases6)
+}
+
 // cgkFiles reads the status of the lists on disk (used at start-up).
 func (a *agent) cgkFiles() api.CGKStatus {
 	al, rw := a.cgkPaths()
-	s := api.CGKStatus{Aliases: len(cgk.ReadList(al)), RewriteRanges: len(cgk.ReadList(rw))}
+	s := api.CGKStatus{Aliases: len(cgk.ReadList(al)), Aliases6: len(cgk.ReadList(a.cgkAliases6Path())), RewriteRanges: len(cgk.ReadList(rw))}
 	if fi, err := os.Stat(al); err == nil {
 		t := fi.ModTime().UTC()
 		s.LastRefresh = &t
@@ -593,18 +597,24 @@ func (a *agent) refreshCGK(ctx context.Context) {
 	aliasFile, rewriteFile := a.cgkPaths()
 	now := time.Now().UTC()
 	a.o.Log.Info("cgk refresh started")
-	res, err := cgk.Measure(ctx, spec, cgk.NetProber{}, cgk.ReadList(rewriteFile), cgk.ReadList(aliasFile), rand.New(rand.NewPCG(uint64(now.UnixNano()), 0)))
+	alias6File := a.cgkAliases6Path()
+	res, err := cgk.Measure(ctx, spec, cgk.NetProber{}, cgk.ReadList(rewriteFile), cgk.ReadList(aliasFile), cgk.ReadList(alias6File),
+		rand.New(rand.NewPCG(uint64(now.UnixNano()), 0)))
 	if ctx.Err() != nil {
 		return
 	}
-	rep := api.CGKReport{MeasuredAt: now, OK: err == nil, Aliases: []string{}, RewriteRanges: []string{}, Pools: []api.CGKPool{}}
+	rep := api.CGKReport{MeasuredAt: now, OK: err == nil, Aliases: []string{}, Aliases6: []string{}, RewriteRanges: []string{}, Pools: []api.CGKPool{}}
 	if res != nil {
 		rep.Pools = res.Pools
 	}
 	if err == nil {
-		rep.Aliases, rep.RewriteRanges = res.Aliases, res.Rewrite
+		rep.Aliases, rep.RewriteRanges, rep.IPv6 = res.Aliases, res.Rewrite, res.IPv6
+		if res.Aliases6 != nil {
+			rep.Aliases6 = res.Aliases6
+		}
 		err = errors.Join(
 			apply.WriteFile(aliasFile, cgk.Format("Cloudflare IPs served from CGK, verified against real sites", now, res.Aliases), 0o644),
+			apply.WriteFile(alias6File, cgk.Format("Cloudflare IPv6 addresses served from CGK ("+res.IPv6+")", now, res.Aliases6), 0o644),
 			apply.WriteFile(rewriteFile, cgk.Format("Cloudflare pools served outside CGK from this server", now, res.Rewrite), 0o644),
 		)
 		if err == nil {
@@ -624,7 +634,7 @@ func (a *agent) refreshCGK(ctx context.Context) {
 		rep.Message = err.Error()
 		a.o.Log.Warn("cgk refresh failed", "err", err)
 	} else {
-		a.o.Log.Info("cgk refresh done", "aliases", len(res.Aliases), "rewrite", res.Rewrite)
+		a.o.Log.Info("cgk refresh done", "aliases", len(res.Aliases), "aliases6", len(res.Aliases6), "ipv6", res.IPv6, "rewrite", res.Rewrite)
 	}
 
 	a.mu.Lock()

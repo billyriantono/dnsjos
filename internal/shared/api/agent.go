@@ -139,6 +139,7 @@ type DynBlock struct {
 
 type CGKStatus struct {
 	Aliases       int        `json:"aliases"`
+	Aliases6      int        `json:"aliases6"`
 	RewriteRanges int        `json:"rewrite_ranges"`
 	LastRefresh   *time.Time `json:"last_refresh,omitempty"`
 	LastError     string     `json:"last_error"`
@@ -186,9 +187,19 @@ type BlockedItem struct {
 	Count int64  `json:"count"`
 }
 
+// IPv6 half of a CGK measurement (CGKReport.IPv6, SPEC §6.7).
+const (
+	CGKIPv6OK             = "ok"
+	CGKIPv6NotConfigured  = "not_configured"  // no IPv6 rewrite or alias pools in the profile
+	CGKIPv6NoConnectivity = "no_connectivity" // no IPv6 sample answered: the node has no IPv6
+	CGKIPv6TooFewAliases  = "too_few_aliases" // fewer than min_ok IPv6 aliases qualified
+)
+
 type CGKReport struct {
 	MeasuredAt    time.Time `json:"measured_at"`
 	Aliases       []string  `json:"aliases"`
+	Aliases6      []string  `json:"aliases6"`
+	IPv6          string    `json:"ipv6"` // CGKIPv6*; "" from agents older than IPv6 support
 	RewriteRanges []string  `json:"rewrite_ranges"`
 	Pools         []CGKPool `json:"pools"`
 	OK            bool      `json:"ok"`

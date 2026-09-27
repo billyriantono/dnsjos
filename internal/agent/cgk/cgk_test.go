@@ -82,7 +82,7 @@ func TestMeasure(t *testing.T) {
 	f := &fake{}
 	prev := []string{poolC.String()}
 	current := []string{"104.16.0.10", "1.1.1.1"} // 1.1.1.1 is outside the alias pools
-	res, err := Measure(context.Background(), spec(), f, prev, current, rand.New(rand.NewPCG(1, 2)))
+	res, err := Measure(context.Background(), spec(), f, prev, current, nil, rand.New(rand.NewPCG(1, 2)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestMeasure(t *testing.T) {
 	}
 
 	// Missing rewrite file → the spec's pools are the previous state: C and D stay rewritten.
-	res, err = Measure(context.Background(), spec(), &fake{}, nil, nil, rand.New(rand.NewPCG(1, 2)))
+	res, err = Measure(context.Background(), spec(), &fake{}, nil, nil, nil, rand.New(rand.NewPCG(1, 2)))
 	if err != nil || !slices.Equal(res.Rewrite, []string{poolA.String(), poolC.String(), poolD.String()}) {
 		t.Fatalf("no previous file: %v %v", res.Rewrite, err)
 	}
@@ -125,12 +125,12 @@ func TestMeasureGuards(t *testing.T) {
 	s := spec()
 	s.MinOK = 50
 	s.AliasesWanted = 50
-	if _, err := Measure(context.Background(), s, &fake{}, nil, nil, rand.New(rand.NewPCG(1, 2))); err == nil || !strings.Contains(err.Error(), "min_ok") {
+	if _, err := Measure(context.Background(), s, &fake{}, nil, nil, nil, rand.New(rand.NewPCG(1, 2))); err == nil || !strings.Contains(err.Error(), "min_ok") {
 		t.Fatalf("min_ok guard: %v", err)
 	}
 	s = spec()
 	s.TestSites = []string{"offpool.test", "down.test", "nxdomain.test"}
-	if _, err := Measure(context.Background(), s, &fake{}, nil, nil, rand.New(rand.NewPCG(1, 2))); err == nil || !strings.Contains(err.Error(), "test site") {
+	if _, err := Measure(context.Background(), s, &fake{}, nil, nil, nil, rand.New(rand.NewPCG(1, 2))); err == nil || !strings.Contains(err.Error(), "test site") {
 		t.Fatalf("no usable site: %v", err)
 	}
 }
@@ -155,5 +155,71 @@ func TestSampleAndFiles(t *testing.T) {
 	os.WriteFile(p, Format("why", time.Now(), nil), 0o644)
 	if got := ReadList(p); got == nil || len(got) != 0 {
 		t.Fatalf("empty file must be non-nil empty: %#v", got)
+	}
+}
+
+// fake6 serves the IPv6 half: 2606:4700:3030::/44 from SIN, 2606:4700::6810:0/110 from CGK
+// answering like the real site; with down set nothing answers over IPv6.
+type fake6 struct{ down bool }
+
+func (fake6) Resolve(context.Context, string) []string { return []string{"2606:4700:3033::6815:3764"} }
+
+func (f fake6) Fetch(_ context.Context, host, ip, _ string) (string, time.Duration, string) {
+	a := netip.MustParseAddr(ip)
+	if f.down || !a.Is6() {
+		return "000", 0, ""
+	}
+	sinPool, aliasPool := netip.MustParsePrefix("2606:4700:3030::/44"), netip.MustParsePrefix("2606:4700::6810:0/110")
+	switch {
+	case host == TraceHost && sinPool.Contains(a):
+		return "200", 0, "colo=SIN\n"
+	case host == TraceHost && aliasPool.Contains(a):
+		return "200", time.Duration(a.As16()[15]) * time.Millisecond, "colo=CGK\n"
+	case aliasPool.Contains(a):
+		return "200", 0, ""
+	}
+	return "000", 0, ""
+}
+
+func TestMeasure6(t *testing.T) {
+	s := spec()
+	s.RewritePools = append(s.RewritePools, "2606:4700:3030::/44", "2606:4700:10::/48")
+	s.AliasPools = append(s.AliasPools, "2606:4700::6810:0/110")
+	pools, _ := parsePrefixes([]string{"2606:4700:3030::/44", "2606:4700:10::/48"})
+	aliases, _ := parsePrefixes([]string{"2606:4700::6810:0/110"})
+	run := func(p Prober) *Result {
+		res := &Result{Sites: map[string]string{"site1.test": "200"}}
+		colo := func(ip string) (string, time.Duration) {
+			_, t, body := p.Fetch(context.Background(), TraceHost, ip, "/cdn-cgi/trace")
+			if c, ok := strings.CutPrefix(strings.TrimSpace(body), "colo="); ok {
+				return c, t
+			}
+			return "", t
+		}
+		measure6(context.Background(), s, p, res, pools, aliases, nil, nil, colo, rand.New(rand.NewPCG(3, 4)))
+		return res
+	}
+	res := run(fake6{})
+	if res.IPv6 != api.CGKIPv6OK || len(res.Aliases6) != s.AliasesWanted {
+		t.Fatalf("ipv6 %q aliases6 %v", res.IPv6, res.Aliases6)
+	}
+	for _, a := range res.Aliases6 {
+		if !netip.MustParsePrefix("2606:4700::6810:0/110").Contains(netip.MustParseAddr(a)) {
+			t.Fatalf("alias %s outside the alias pool", a)
+		}
+	}
+	// the SIN pool is rewritten; 2606:4700:10::/48 gave no answer and was never rewritten
+	if strings.Join(res.Rewrite, ",") != "2606:4700:3030::/44" {
+		t.Fatalf("rewrite %v", res.Rewrite)
+	}
+	res = run(fake6{down: true})
+	if res.IPv6 != api.CGKIPv6NoConnectivity || res.Aliases6 != nil || res.Rewrite != nil {
+		t.Fatalf("no IPv6: %+v", res)
+	}
+	for _, ip := range sample6(netip.MustParsePrefix("2606:4700:3030::/44"), 20, rand.New(rand.NewPCG(1, 1))) {
+		a := netip.MustParseAddr(ip).As16()
+		if v4 := netip.AddrFrom4([4]byte(a[12:])); !cfV4[0].Contains(v4) && !cfV4[1].Contains(v4) {
+			t.Fatalf("sample %s does not embed a Cloudflare IPv4 address", ip)
+		}
 	}
 }

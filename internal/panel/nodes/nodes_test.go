@@ -504,7 +504,8 @@ func TestBlockedAndCGK(t *testing.T) {
 	}
 	var latest api.CGKReport
 	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID+"/cgk", "admin", nil, &latest)
-	if !latest.MeasuredAt.Equal(base.Add(102*time.Second)) || !latest.OK || len(latest.Aliases) != 1 || latest.Pools == nil {
+	if !latest.MeasuredAt.Equal(base.Add(102*time.Second)) || !latest.OK || len(latest.Aliases) != 1 || latest.Pools == nil ||
+		latest.Aliases6 == nil || latest.IPv6 != "" {
 		t.Fatalf("latest cgk: %+v", latest)
 	}
 }
@@ -527,6 +528,15 @@ func TestCGKLearned(t *testing.T) {
 		t.Fatalf("after report: %+v", rep)
 	}
 	e.call(404, "GET", "/api/v1/nodes/00000000-0000-0000-0000-000000000000/cgk/learned", "admin", nil, nil)
+
+	// SPEC §6.7: the IPv6 half of a CGK report round-trips.
+	e.call(204, "POST", "/agent/v1/cgk", er.NodeToken, api.CGKReport{MeasuredAt: at, OK: true, Aliases: []string{"104.16.0.1"},
+		Aliases6: []string{"2606:4700::6810:1"}, IPv6: api.CGKIPv6OK}, nil)
+	var latest api.CGKReport
+	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID+"/cgk", "admin", nil, &latest)
+	if latest.IPv6 != api.CGKIPv6OK || len(latest.Aliases6) != 1 || latest.Aliases6[0] != "2606:4700::6810:1" {
+		t.Fatalf("ipv6 report: %+v", latest)
+	}
 }
 
 // SPEC §17: an adopted node gets its overrides from the enroll request and no config
