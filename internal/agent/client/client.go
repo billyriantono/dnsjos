@@ -27,8 +27,14 @@ type Client struct {
 }
 
 func New(baseURL, token, version string) *Client {
-	// TLS verification stays on: the default transport verifies the panel certificate.
-	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, Version: version, HTTP: &http.Client{}}
+	// TLS verification stays on: the cloned default transport verifies the panel certificate.
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	// All requests share one HTTP/2 connection, and heartbeats, config polls and
+	// uploads keep it busy, so it is never idle. After the node's address changed,
+	// that connection (bound to the old address) hung every request until a
+	// restart. Health pings drop a connection that stops answering.
+	tr.HTTP2 = &http.HTTP2Config{SendPingTimeout: 15 * time.Second, PingTimeout: 10 * time.Second, WriteByteTimeout: 15 * time.Second}
+	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), Token: token, Version: version, HTTP: &http.Client{Transport: tr}}
 }
 
 // StatusError is a non-2xx/304 panel answer.
