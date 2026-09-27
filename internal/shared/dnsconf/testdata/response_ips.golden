@@ -9,16 +9,60 @@ controlSocket("127.0.0.1:5199")
 setKey("Y29uc29sZS1rZXktMzItYnl0ZXMtLS0tLS0tLS0tLS0=")
 setConsoleACL("127.0.0.1/32")
 webserver("127.0.0.1:8083")
-setWebserverConfig({password = "web-pass", apiKey = "api-key", acl = "127.0.0.1/32, ::1/128", statsRequireAuthentication = true})
+setWebserverConfig({password = "$scrypt$ln=10,p=1,r=8$QJMKTudr7X2QK7bIefDNKw==$slzMEEZZNzpCooMVNeLhvApisJiClUeqMel8CUOdp/A=", apiKey = "$scrypt$ln=10,p=1,r=8$2wDcajr7qBHkM9eKCKyEtA==$G/+hUZ7DENpAesFMqepEejB/IPquRs829ziP6nscWUs=", acl = "127.0.0.1/32, ::1/128", statsRequireAuthentication = true})
 
-getPool(""):setCache(newPacketCache(500000, {minTTL = 0, maxTTL = 86400, staleTTL = 60}))
-setStaleCacheEntriesTTL(60)
+getPool(""):setCache(newPacketCache(500000, {minTTL = 0, maxTTL = 86400, staleTTL = 60, keepStaleData = true}))
+setStaleCacheEntriesTTL(3600)
 
 newServer({address = "1.1.1.1:53", name = "cloudflare1", weight = 30, order = 1, sockets = 4, checkInterval = 1, pool = ""})
 newServer({address = "1.0.0.1:53", name = "cloudflare2", weight = 30, order = 1, sockets = 4, checkInterval = 1, pool = ""})
 newServer({address = "8.8.8.8:53", name = "google1", weight = 20, order = 1, sockets = 4, checkInterval = 1, pool = ""})
 newServer({address = "8.8.4.4:53", name = "google2", weight = 20, order = 1, sockets = 4, checkInterval = 1, pool = ""})
-setServerPolicy(whashed)
+setServerPolicyLuaFFIPerThread("whashedLatency", [[
+  local ffi = require("ffi")
+  local C = ffi.C
+  local floor = 20000
+  local srv = ffi.new("const dnsdist_ffi_server_t*[1]")
+  local cum, total, stamp, count = {}, 0, -1, -1
+  local function recompute(list, n)
+    local best, lat, w = math.huge, {}, {}
+    for i = 0, n - 1 do
+      C.dnsdist_ffi_servers_list_get_server(list, i, srv)
+      if C.dnsdist_ffi_server_is_up(srv[0]) then
+        lat[i] = math.max(C.dnsdist_ffi_server_get_latency(srv[0]), floor)
+        w[i] = C.dnsdist_ffi_server_get_weight(srv[0])
+        best = math.min(best, lat[i])
+      end
+    end
+    total = 0
+    for i = 0, n - 1 do
+      if lat[i] then total = total + math.max(1, math.floor(w[i] * best / lat[i] + 0.5)) end
+      cum[i] = total
+    end
+  end
+  return function(list, dq)
+    local n = tonumber(C.dnsdist_ffi_servers_list_get_count(list))
+    local now = os.time()
+    if now ~= stamp or n ~= count then
+      stamp, count = now, n
+      recompute(list, n)
+    end
+    if total == 0 then return n end
+    for _ = 1, 2 do
+      local h = tonumber(C.dnsdist_ffi_dnsquestion_get_qname_hash(dq, 0) % total)
+      for i = 0, n - 1 do
+        if h < cum[i] then
+          C.dnsdist_ffi_servers_list_get_server(list, i, srv)
+          if C.dnsdist_ffi_server_is_up(srv[0]) then return i end
+          break
+        end
+      end
+      recompute(list, n) -- a server went down since the last recompute
+      if total == 0 then return n end
+    end
+    return n
+  end
+]])
 
 dofile("/etc/dnsdist/dnsjos/blocking.lua")
 ==> dnsjos/blocking.lua <==

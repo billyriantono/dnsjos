@@ -49,6 +49,9 @@ type Upstreams struct {
 	Policy               string     `json:"policy"`
 	Servers              []Upstream `json:"servers"`
 	HealthCheckIntervalS int        `json:"health_check_interval_s"`
+	// PolicyLatencyAware only: upstreams answering faster than this count as equally fast
+	// (0 = 20 ms), so normal jitter does not reshuffle which upstream serves a name.
+	LatencyFloorMs int `json:"latency_floor_ms"`
 }
 
 type Upstream struct {
@@ -113,8 +116,12 @@ type Webserver struct {
 	PrometheusACL []string `json:"prometheus_acl"`
 }
 
+// PolicyLatencyAware is whashed with each weight scaled down by the upstream's measured
+// latency (a Lua FFI policy, SPEC §6.4): a slow upstream gets fewer names until it recovers.
+const PolicyLatencyAware = "whashedLatency"
+
 // Upstream server policies accepted by Upstreams.Policy.
-var Policies = []string{"whashed", "wrandom", "leastOutstanding", "roundrobin", "firstAvailable"}
+var Policies = []string{"whashed", PolicyLatencyAware, "wrandom", "leastOutstanding", "roundrobin", "firstAvailable"}
 
 // Dynamic block actions accepted by Abuse.DynAction.
 var DynActions = []string{"truncate", "drop", "refused"}
@@ -139,7 +146,7 @@ func DefaultConfigSpec() ConfigSpec {
 			"192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10",
 		},
 		Upstreams: Upstreams{
-			Policy: "whashed",
+			Policy: PolicyLatencyAware,
 			Servers: []Upstream{
 				up("1.1.1.1:53", "cloudflare1", 30),
 				up("1.0.0.1:53", "cloudflare2", 30),
@@ -148,7 +155,7 @@ func DefaultConfigSpec() ConfigSpec {
 			},
 			HealthCheckIntervalS: 1,
 		},
-		Cache: Cache{Enabled: true, MaxEntries: 500000, MinTTL: 0, MaxTTL: 86400, StaleTTL: 60},
+		Cache: Cache{Enabled: true, MaxEntries: 500000, MinTTL: 0, MaxTTL: 86400, StaleTTL: 3600},
 		Blocking: Blocking{
 			Enabled: true,
 			// Documentation addresses (RFC 5737 / RFC 3849): set your own blockpage server.

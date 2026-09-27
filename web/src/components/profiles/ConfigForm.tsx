@@ -175,7 +175,7 @@ export function ConfigForm({
             <NumField label="Max entries" path="cache.max_entries" value={c.max_entries} onChange={(max_entries) => part('cache', { max_entries })} min={1} help="≈ 500 bytes of RAM each." />
             <NumField label="Min TTL" path="cache.min_ttl" value={c.min_ttl} onChange={(min_ttl) => part('cache', { min_ttl })} min={0} unit="s" help="Raise short TTLs to at least this." />
             <NumField label="Max TTL" path="cache.max_ttl" value={c.max_ttl} onChange={(max_ttl) => part('cache', { max_ttl })} min={0} unit="s" help="Cap long TTLs." />
-            <NumField label="Stale TTL" path="cache.stale_ttl" value={c.stale_ttl} onChange={(stale_ttl) => part('cache', { stale_ttl })} min={0} unit="s" help="Serve expired answers this long when all upstreams are down." />
+            <NumField label="Stale TTL" path="cache.stale_ttl" value={c.stale_ttl} onChange={(stale_ttl) => part('cache', { stale_ttl })} min={0} unit="s" help="When every upstream is down, keep answering from expired cache entries for this long (stale answers carry a 60 s TTL). 0 = off." />
           </Grid>
         </Section>
       </TabsContent>

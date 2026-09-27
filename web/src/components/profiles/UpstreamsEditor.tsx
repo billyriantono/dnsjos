@@ -81,6 +81,19 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
           unit="seconds"
           help="How often each upstream is probed; a down upstream gets no traffic."
         />
+        {value.policy === 'whashedLatency' && (
+          <NumField
+            className="max-w-xs"
+            label="Latency floor"
+            path="upstreams.latency_floor_ms"
+            value={value.latency_floor_ms ?? 0}
+            onChange={(v) => onChange({ ...value, latency_floor_ms: v })}
+            min={0}
+            max={10000}
+            unit="ms"
+            help="Upstreams answering faster than this count as equally fast, so jitter does not move names around. 0 = 20 ms."
+          />
+        )}
       </Section>
 
       <Section

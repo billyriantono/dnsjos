@@ -209,6 +209,16 @@ func TestMaskSecrets(t *testing.T) {
 	}
 }
 
+func TestHashCredential(t *testing.T) {
+	h := hashCredential("secret")
+	if !strings.HasPrefix(h, "$scrypt$ln=10,p=1,r=8$") || h != hashCredential("secret") || h == hashCredential("secret2") {
+		t.Fatalf("want a deterministic, per-secret dnsdist scrypt hash, got %q", h)
+	}
+	if hashCredential(h) != h {
+		t.Error("an already-hashed credential must pass through")
+	}
+}
+
 // TestCheckConfig runs dnsdist --check-config on rendered configs when dnsdist is installed.
 func TestCheckConfig(t *testing.T) {
 	bin, err := exec.LookPath("dnsdist")
@@ -221,6 +231,7 @@ func TestCheckConfig(t *testing.T) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Cache.Enabled, s.Analytics.Enabled = false, false, false, false, false
 		},
 		"analytics_sampled": func(s *api.ConfigSpec) { s.Analytics.SampleRate = 7 },
+		"whashed_no_stale": func(s *api.ConfigSpec) { s.Upstreams.Policy, s.Cache.StaleTTL = "whashed", 0 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -237,7 +248,8 @@ func TestCheckConfig(t *testing.T) {
 				os.WriteFile(filepath.Join(dir, rel), b, 0o644)
 			}
 			out, err := exec.Command(bin, "--check-config", "-C", filepath.Join(dir, FileConf)).CombinedOutput()
-			if err != nil || !strings.Contains(string(out), "Configuration OK") {
+			// Plain logging prints "Configuration '<file>' OK!", structured logging "Configuration OK".
+			if o := string(out); err != nil || !strings.Contains(o, "' OK!") && !strings.Contains(o, "Configuration OK") {
 				t.Fatalf("check-config: %v\n%s", err, out)
 			}
 		})

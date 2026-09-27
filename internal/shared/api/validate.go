@@ -105,6 +105,7 @@ func (s ConfigSpec) Validate() error {
 		}
 	}
 	between("upstreams.health_check_interval_s", u.HealthCheckIntervalS, 1, 3600)
+	between("upstreams.latency_floor_ms", u.LatencyFloorMs, 0, 10_000)
 
 	c := s.Cache
 	if c.Enabled {

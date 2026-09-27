@@ -3,6 +3,9 @@
 package dnsconf
 
 import (
+	"cmp"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -11,6 +14,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"golang.org/x/crypto/scrypt"
 
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
@@ -126,14 +131,20 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		}
 	}
 	w("webserver(%s)\nsetWebserverConfig({password = %s, apiKey = %s, acl = %s, statsRequireAuthentication = true})\n",
-		luaString(web), luaString(rt.WebPassword), luaString(rt.WebAPIKey), luaString(strings.Join(webACL, ", ")))
+		luaString(web), luaString(hashCredential(rt.WebPassword)), luaString(hashCredential(rt.WebAPIKey)),
+		luaString(strings.Join(webACL, ", ")))
 
 	if ca := spec.Cache; ca.Enabled {
-		w("\ngetPool(\"\"):setCache(newPacketCache(%d, {minTTL = %d, maxTTL = %d, staleTTL = %d}))\n",
-			ca.MaxEntries, ca.MinTTL, ca.MaxTTL, ca.StaleTTL)
 		if ca.StaleTTL > 0 {
 			// Serve entries expired for up to stale_ttl seconds when every backend is down.
+			// keepStaleData stops the cleaner (every 60 s) from deleting expired entries while
+			// the pool is down, without it only entries expired < 60 s ago survive. Stale
+			// answers carry a TTL of at most 60 s so clients come back once upstreams recover.
+			w("\ngetPool(\"\"):setCache(newPacketCache(%d, {minTTL = %d, maxTTL = %d, staleTTL = %d, keepStaleData = true}))\n",
+				ca.MaxEntries, ca.MinTTL, ca.MaxTTL, min(ca.StaleTTL, 60))
 			w("setStaleCacheEntriesTTL(%d)\n", ca.StaleTTL)
+		} else {
+			w("\ngetPool(\"\"):setCache(newPacketCache(%d, {minTTL = %d, maxTTL = %d}))\n", ca.MaxEntries, ca.MinTTL, ca.MaxTTL)
 		}
 	}
 
@@ -153,7 +164,11 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 	if !slices.Contains(api.Policies, spec.Upstreams.Policy) {
 		return nil, fmt.Errorf("upstreams.policy: unknown %q", spec.Upstreams.Policy)
 	}
-	w("setServerPolicy(%s)\n", spec.Upstreams.Policy) // identifier from a fixed allowlist
+	if spec.Upstreams.Policy == api.PolicyLatencyAware {
+		w(latencyPolicy, cmp.Or(spec.Upstreams.LatencyFloorMs, 20)*1000)
+	} else {
+		w("setServerPolicy(%s)\n", spec.Upstreams.Policy) // identifier from a fixed allowlist
+	}
 
 	module := func(rel string, body []byte) {
 		files[rel] = body
@@ -206,6 +221,77 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 	}
 	files[FileConf] = []byte(c.String())
 	return files, nil
+}
+
+// latencyPolicy is whashed (same name → same upstream, for upstream cache locality) with
+// each up server's weight scaled by fastest/own latency, recomputed once a second per
+// thread (and at once when the picked server went down since). Latencies below the floor (µs, the format argument) count as equal. Every up
+// server keeps weight ≥ 1 so its latency keeps being measured and it can win traffic back.
+// Returning n (the server count) means "none available" (dnsdist ≥ 1.9.2).
+const latencyPolicy = `setServerPolicyLuaFFIPerThread("whashedLatency", [[
+  local ffi = require("ffi")
+  local C = ffi.C
+  local floor = %d
+  local srv = ffi.new("const dnsdist_ffi_server_t*[1]")
+  local cum, total, stamp, count = {}, 0, -1, -1
+  local function recompute(list, n)
+    local best, lat, w = math.huge, {}, {}
+    for i = 0, n - 1 do
+      C.dnsdist_ffi_servers_list_get_server(list, i, srv)
+      if C.dnsdist_ffi_server_is_up(srv[0]) then
+        lat[i] = math.max(C.dnsdist_ffi_server_get_latency(srv[0]), floor)
+        w[i] = C.dnsdist_ffi_server_get_weight(srv[0])
+        best = math.min(best, lat[i])
+      end
+    end
+    total = 0
+    for i = 0, n - 1 do
+      if lat[i] then total = total + math.max(1, math.floor(w[i] * best / lat[i] + 0.5)) end
+      cum[i] = total
+    end
+  end
+  return function(list, dq)
+    local n = tonumber(C.dnsdist_ffi_servers_list_get_count(list))
+    local now = os.time()
+    if now ~= stamp or n ~= count then
+      stamp, count = now, n
+      recompute(list, n)
+    end
+    if total == 0 then return n end
+    for _ = 1, 2 do
+      local h = tonumber(C.dnsdist_ffi_dnsquestion_get_qname_hash(dq, 0) %% total)
+      for i = 0, n - 1 do
+        if h < cum[i] then
+          C.dnsdist_ffi_servers_list_get_server(list, i, srv)
+          if C.dnsdist_ffi_server_is_up(srv[0]) then return i end
+          break
+        end
+      end
+      recompute(list, n) -- a server went down since the last recompute
+      if total == 0 then return n end
+    end
+    return n
+  end
+]])
+`
+
+// hashCredential returns dnsdist's scrypt format for a webserver password or API key, so
+// the plaintext never lands in dnsdist.conf (it stays in the agent's secrets.json). The
+// salt is derived from the secret, keeping the render deterministic: a random salt would
+// change dnsdist.conf, and so restart dnsdist, on every apply. N/r/p are dnsdist's
+// hashPassword() defaults. Already-hashed values (adopted configs) pass through.
+func hashCredential(secret string) string {
+	if strings.HasPrefix(secret, "$scrypt$") {
+		return secret
+	}
+	sum := sha256.Sum256([]byte("dnsjos webserver credential salt\x00" + secret))
+	salt := sum[:16]
+	key, err := scrypt.Key([]byte(secret), salt, 1024, 8, 1, 32)
+	if err != nil {
+		panic(err) // only for invalid N/r/p, which are constants
+	}
+	b64 := base64.StdEncoding.EncodeToString
+	return "$scrypt$ln=10,p=1,r=8$" + b64(salt) + "$" + b64(key)
 }
 
 func withDefaults(rt api.NodeRuntime) api.NodeRuntime {

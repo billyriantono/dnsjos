@@ -16,16 +16,16 @@ export const defaultSpec = (): ConfigSpec => ({
     '192.168.0.0/16', '::1/128', 'fc00::/7', 'fe80::/10',
   ],
   upstreams: {
-    policy: 'whashed',
+    policy: 'whashedLatency',
     servers: [
       up('1.1.1.1:53', 'cloudflare1', 30),
       up('1.0.0.1:53', 'cloudflare2', 30),
       up('8.8.8.8:53', 'google1', 20),
       up('8.8.4.4:53', 'google2', 20),
     ],
-    health_check_interval_s: 1,
+    health_check_interval_s: 1, latency_floor_ms: 0,
   },
-  cache: { enabled: true, max_entries: 500000, min_ttl: 0, max_ttl: 86400, stale_ttl: 60 },
+  cache: { enabled: true, max_entries: 500000, min_ttl: 0, max_ttl: 86400, stale_ttl: 3600 },
   blocking: {
     enabled: true,
     blockpage_ipv4: '192.0.2.10',
@@ -107,6 +107,11 @@ export const POLICY_INFO: Record<ServerPolicy, { label: string; help: string; we
   whashed: {
     label: 'Weighted hash',
     help: 'Hashes the query name so a given name always goes to the same upstream (better upstream cache reuse), spread by weight.',
+    weighted: true,
+  },
+  whashedLatency: {
+    label: 'Weighted hash, latency-aware',
+    help: 'Like whashed, but a slow upstream’s weight shrinks in proportion to its latency (re-measured every second), so it gets fewer names until it recovers.',
     weighted: true,
   },
   wrandom: { label: 'Weighted random', help: 'Picks a random healthy upstream for every query, in proportion to its weight.', weighted: true },
