@@ -22,7 +22,7 @@
   <a href="#-tour">Tour</a> ·
   <a href="#-how-it-works">How it works</a> ·
   <a href="#-quick-start">Quick start</a> ·
-  <a href="#-deploy">Deploy</a> ·
+  <a href="DEPLOY.md">Deploy</a> ·
   <a href="docs/OPERATIONS.md">Operations</a> ·
   <a href="docs/SPEC.md">Spec</a> ·
   <a href="#-license">License</a>
@@ -258,6 +258,9 @@ A plain `go build ./...` always works, because placeholders are committed for th
    curl -fsSL https://PANEL/install.sh | sudo sh -s -- --token TOKEN
    ```
 
+The full, step-by-step production runbook (with a check after every step) is
+**[DEPLOY.md](DEPLOY.md)**.
+
 Already running dnsdist? **Adopt** it instead. The agent imports the existing
 secrets, listeners and certificates, and shows you a plan before touching anything.
 Adopt one node at a time, so customers keep resolving. See the
@@ -270,6 +273,7 @@ rebuild; see `DNSJOS_BRAND_*` in [`deploy/dnsjos.env.example`](deploy/dnsjos.env
 
 | Document | What's inside |
 |---|---|
+| [DEPLOY.md](DEPLOY.md) | Step-by-step production deployment with a check after every step; written so an AI agent can follow it |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | Adding and adopting nodes, publishing changes, emergency unblock, Grafana/read-only API |
 | [docs/SPEC.md](docs/SPEC.md) | The full design contract: config schema, renderer, agent protocol, API, rollouts, analytics |
 
