@@ -92,7 +92,7 @@ func Run(ctx context.Context, o Options) error {
 	o.Log.Info("agent starting", "version", o.Version, "panel", a.cl.BaseURL, "root", o.Root, "no_systemd", o.NoSystemd)
 
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.inventoryLoop, a.allowlistLoop} {
+	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.cgkLearnLoop, a.inventoryLoop, a.allowlistLoop} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
@@ -637,5 +637,77 @@ func (a *agent) refreshCGK(ctx context.Context) {
 	a.mu.Unlock()
 	if perr := a.cl.PostCGK(ctx, rep); perr != nil && ctx.Err() == nil {
 		a.o.Log.Warn("posting cgk report failed", "err", perr)
+	}
+}
+
+// ── CGK exclusion learning (SPEC §6.6) ──────────────────────────────────────
+
+const cgkLearnEvery = 10 * time.Minute
+
+// cgkLearnLoop drains the names cgk.lua rewrote, checks the busiest through their
+// alias, and keeps dnsjos/cgk-learned-exclude.txt (read by cgkReload()) up to date.
+func (a *agent) cgkLearnLoop(ctx context.Context) {
+	st := cgk.LearnState{}
+	if b, err := os.ReadFile(a.o.path(CGKLearnState)); err == nil {
+		if err := json.Unmarshal(b, &st); err != nil || st == nil {
+			st = cgk.LearnState{}
+		}
+	}
+	t := time.NewTicker(cgkLearnEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		a.cgkLearn(ctx, st)
+	}
+}
+
+func (a *agent) cgkLearn(ctx context.Context, st cgk.LearnState) {
+	a.mu.Lock()
+	on := a.cfg != nil && a.cfg.Spec.CGK.Enabled && a.applied != 0
+	a.mu.Unlock()
+	if !on {
+		return
+	}
+	out, err := dnsdist.Console(ctx, a.app.Conf(), "cgkSeen()")
+	if err != nil {
+		if ctx.Err() == nil && !(errors.Is(err, dnsdist.ErrNoBinary) && a.o.NoSystemd) {
+			a.o.Log.Debug("cgk learning: cgkSeen() failed", "err", err)
+		}
+		return
+	}
+	now := time.Now().UTC()
+	changed := cgk.Learn(ctx, cgk.NetProber{}, st, cgk.ParseSeen(out), now)
+	if ctx.Err() != nil {
+		return
+	}
+	if b, err := json.Marshal(st); err == nil {
+		if err := apply.WriteFile(a.o.path(CGKLearnState), b, 0o600); err != nil {
+			a.o.Log.Warn("cgk learning: saving state failed", "err", err)
+		}
+	}
+	file := filepath.Join(a.o.path(DnsdistDir), dnsconf.FileCGKLearned)
+	excluded := st.Excluded()
+	if _, err := os.Stat(file); changed || os.IsNotExist(err) {
+		names := make([]string, len(excluded))
+		for i, e := range excluded {
+			names[i] = e.Name
+		}
+		err := apply.WriteFile(file, cgk.Format("names broken through a CGK alias, never rewritten", now, names), 0o644)
+		if err == nil {
+			_, err = dnsdist.Console(ctx, a.app.Conf(), "cgkReload()")
+		}
+		if err != nil {
+			a.o.Log.Warn("cgk learning: applying exclusions failed", "err", err)
+		} else if changed {
+			a.o.Log.Info("cgk learned exclusions updated", "excluded", len(names))
+		}
+	}
+	rep := api.CGKLearnedReport{Excluded: excluded, Checked: st.Checked(), At: now}
+	if err := a.cl.PostCGKLearned(ctx, rep); err != nil && ctx.Err() == nil {
+		a.o.Log.Warn("posting cgk learned exclusions failed", "err", err)
 	}
 }

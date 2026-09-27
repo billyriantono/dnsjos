@@ -181,6 +181,12 @@ func (c *Client) PostCGK(ctx context.Context, r api.CGKReport) error {
 	return err
 }
 
+// PostCGKLearned reports the node's learned CGK exclusions (SPEC §6.6).
+func (c *Client) PostCGKLearned(ctx context.Context, r api.CGKLearnedReport) error {
+	_, _, err := c.JSON(ctx, http.MethodPost, "/agent/v1/cgk/learned", r, nil, nil)
+	return err
+}
+
 // Allowlist fetches the active allowlist; version is the applied one ("" = none). nil
 // with nil error means 304 (unchanged).
 func (c *Client) Allowlist(ctx context.Context, version string) (*api.Allowlist, error) {

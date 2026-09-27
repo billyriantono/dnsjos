@@ -195,6 +195,26 @@ type CGKReport struct {
 	Message       string    `json:"message"`
 }
 
+// CGKLearned is one rewritten name the agent checked through its CGK alias (SPEC §6.6).
+type CGKLearned struct {
+	Name      string    `json:"name"`
+	RealIP    string    `json:"real_ip"`
+	AliasIP   string    `json:"alias_ip"`
+	RealCode  string    `json:"real_code"`  // HTTP status via the real IP; "000" = no HTTPS answer
+	AliasCode string    `json:"alias_code"` // HTTP status via the alias
+	Excluded  bool      `json:"excluded"`
+	Hits      int64     `json:"hits"` // rewritten answers counted since first seen
+	CheckedAt time.Time `json:"checked_at"`
+	LastSeen  time.Time `json:"last_seen"`
+}
+
+// CGKLearnedReport is POST /agent/v1/cgk/learned: the node's learned exclusions.
+type CGKLearnedReport struct {
+	Excluded []CGKLearned `json:"excluded"`
+	Checked  int          `json:"checked"` // names with a verdict (ok or excluded)
+	At       time.Time    `json:"at"`
+}
+
 type CGKPool struct {
 	Net   string   `json:"net"`
 	Colos []string `json:"colos"`

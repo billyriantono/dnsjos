@@ -191,10 +191,14 @@ func Measure(ctx context.Context, spec api.CGK, p Prober, prevRewrite, current [
 
 // parallel runs f over items with a bounded worker pool.
 func parallel[T any](items []string, f func(string) T) map[string]T {
+	return parallelN(items, workers, f)
+}
+
+func parallelN[T any](items []string, n int, f func(string) T) map[string]T {
 	out := make(map[string]T, len(items))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, workers)
+	sem := make(chan struct{}, n)
 	for _, it := range items {
 		wg.Add(1)
 		sem <- struct{}{}

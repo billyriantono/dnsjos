@@ -240,6 +240,25 @@ export interface CGKPool {
   net: string
   colos: string[]
 }
+/** SPEC §6.6: a rewritten name the agent checked through its CGK alias. */
+export interface CGKLearned {
+  name: string
+  real_ip: string
+  alias_ip: string
+  /** HTTP status via the real IP; "000" = no HTTPS answer (Spectrum / non-HTTP app). */
+  real_code: string
+  alias_code: string
+  excluded: boolean
+  hits: number
+  checked_at: string
+  last_seen: string
+}
+export interface CGKLearnedReport {
+  excluded: CGKLearned[]
+  checked: number
+  /** Zero time before the first report. */
+  at: string
+}
 export interface CGKReport {
   measured_at: string
   aliases: string[]

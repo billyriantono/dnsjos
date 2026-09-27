@@ -509,6 +509,26 @@ func TestBlockedAndCGK(t *testing.T) {
 	}
 }
 
+// SPEC §6.6: the latest learned CGK exclusions per node.
+func TestCGKLearned(t *testing.T) {
+	e := setup(t)
+	er := e.enroll("dns-learn")
+	var rep api.CGKLearnedReport
+	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID+"/cgk/learned", "admin", nil, &rep)
+	if rep.Excluded == nil || len(rep.Excluded) != 0 || !rep.At.IsZero() {
+		t.Fatalf("before any report: %+v", rep)
+	}
+	at := time.Now().UTC().Truncate(time.Second)
+	e.call(204, "POST", "/agent/v1/cgk/learned", er.NodeToken, api.CGKLearnedReport{At: at, Checked: 12, Excluded: []api.CGKLearned{
+		{Name: "mail.example.net", RealIP: "104.20.0.3", AliasIP: "104.16.0.9", RealCode: "000", AliasCode: "000", Excluded: true, Hits: 30}}}, nil)
+	e.call(401, "POST", "/agent/v1/cgk/learned", "", api.CGKLearnedReport{}, nil)
+	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID+"/cgk/learned", "admin", nil, &rep)
+	if rep.Checked != 12 || len(rep.Excluded) != 1 || rep.Excluded[0].Name != "mail.example.net" || !rep.At.Equal(at) {
+		t.Fatalf("after report: %+v", rep)
+	}
+	e.call(404, "GET", "/api/v1/nodes/00000000-0000-0000-0000-000000000000/cgk/learned", "admin", nil, nil)
+}
+
 // SPEC §17: an adopted node gets its overrides from the enroll request and no config
 // until a blocklist exists (panel build or a seeded local CDB reported by heartbeat).
 func TestAdopt(t *testing.T) {

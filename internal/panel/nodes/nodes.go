@@ -49,6 +49,7 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Admin("DELETE /api/v1/nodes/{id}", s.deleteNode)
 	r.Viewer("GET /api/v1/nodes/{id}/live", s.live)
 	r.Viewer("GET /api/v1/nodes/{id}/cgk", s.cgkLatest)
+	r.Viewer("GET /api/v1/nodes/{id}/cgk/learned", s.cgkLearnedGet)
 	r.Admin("POST /api/v1/nodes/{id}/commands", s.command)
 	r.Viewer("GET /api/v1/nodes/{id}/versions", s.versions)
 
@@ -57,6 +58,7 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Agent("POST /agent/v1/heartbeat", s.heartbeat)
 	r.Agent("POST /agent/v1/blocked", s.blocked)
 	r.Agent("POST /agent/v1/cgk", s.cgk)
+	r.Agent("POST /agent/v1/cgk/learned", s.cgkLearnedPost)
 
 	r.Public("GET /install.sh", s.installScript)
 	r.Public("GET /dl/agent/linux/{arch}", s.download)
@@ -502,4 +504,48 @@ func (s *svc) statusTick(ctx context.Context) error {
 	_, err := s.d.Pool.Exec(ctx, `UPDATE offender_events SET closed = true
 		WHERE NOT closed AND last_seen < now() - interval '10 minutes'`)
 	return err
+}
+
+// cgkLearnedGet is the node's latest learned CGK exclusions (SPEC §6.6); an empty list
+// with a null "at" before the first report.
+func (s *svc) cgkLearnedGet(w http.ResponseWriter, r *http.Request) {
+	rep := api.CGKLearnedReport{Excluded: []api.CGKLearned{}}
+	var at *time.Time
+	err := s.d.Pool.QueryRow(r.Context(), `SELECT cgk_learned, cgk_learned_checked, cgk_learned_at FROM nodes
+		WHERE id = $1 AND deleted_at IS NULL`, r.PathValue("id")).Scan(&rep.Excluded, &rep.Checked, &at)
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	if at != nil {
+		rep.At = *at
+	}
+	httpx.WriteJSON(w, http.StatusOK, rep)
+}
+
+func (s *svc) cgkLearnedPost(w http.ResponseWriter, r *http.Request) {
+	var rep api.CGKLearnedReport
+	if err := httpx.ReadJSON(r, &rep, httpx.MaxJSON); err != nil {
+		httpx.BadRequest(w, err.Error())
+		return
+	}
+	if len(rep.Excluded) > 4096 {
+		httpx.BadRequest(w, "too many learned exclusions")
+		return
+	}
+	if rep.Excluded == nil {
+		rep.Excluded = []api.CGKLearned{}
+	}
+	for i := range rep.Excluded {
+		rep.Excluded[i].Name = clip(rep.Excluded[i].Name, 255)
+	}
+	if rep.At.IsZero() {
+		rep.At = time.Now()
+	}
+	if _, err := s.d.Pool.Exec(r.Context(), `UPDATE nodes SET cgk_learned = $2, cgk_learned_checked = $3, cgk_learned_at = $4
+		WHERE id = $1`, app.NodeIDFrom(r.Context()), rep.Excluded, rep.Checked, rep.At); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }

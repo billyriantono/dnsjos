@@ -32,6 +32,8 @@ const (
 	// AnalyticsSpoolDir holds unsent analytics batches (SPEC §19).
 	AnalyticsSpoolDir = DataDir + "/analytics-spool"
 	CDBPath           = DataDir + "/blocklist/current.cdb"
+	// CGKLearnState is the agent's memory of names checked through CGK aliases (SPEC §6.6).
+	CGKLearnState = DataDir + "/cgk-learned.json"
 )
 
 type Options struct {

@@ -39,6 +39,8 @@ const (
 	// Owned by the agent's CGK prober, never rendered.
 	FileCGKAliases = "dnsjos/cgk-aliases.txt"
 	FileCGKRewrite = "dnsjos/cgk-rewrite.txt"
+	// Names the agent found broken through a CGK alias (SPEC §6.6), never rendered.
+	FileCGKLearned = "dnsjos/cgk-learned-exclude.txt"
 	// Owned by the agent's allowlist sync, never rendered.
 	FileAllowDomains = "dnsjos/allowlist-domains.txt"
 	FileAllowIPs     = "dnsjos/allowlist-ips.txt"

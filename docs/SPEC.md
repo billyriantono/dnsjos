@@ -381,6 +381,36 @@ orchestrator (§18) instead of to every node at once:
   while a config run of that profile is running or paused.
 * Changing a node's profile clears its pin.
 
+### 6.6 CGK exclusion learning
+
+Rewriting a name to a CGK alias only works for plain HTTP(S) zones on Cloudflare's shared
+edge. Spectrum apps (TCP/UDP on other ports), IP-bound configurations and WAF rules on
+specific addresses break. The static `cgk.exclude` list is kept by hand; the agent adds
+names it finds broken by itself:
+
+* `cgk.lua` records every rewritten name in a bounded table (2 000 names): lower-case name,
+  the first real A address inside a rewrite range, the alias it got, and a count. A name on
+  the learned list is not rewritten but still counted, with IPs `-`. The console function
+  `cgkSeen()` returns `name real-ip alias-ip count` lines and empties the table.
+* Every 10 min, when CGK is enabled, the agent drains `cgkSeen()`, merges it into its state
+  (`/var/lib/dnsjos/cgk-learned.json`) and checks up to 40 due names, busiest first. A name
+  is due when never checked, 24 h after an ok verdict, or 7 days after an exclusion. A check
+  is `GET https://name/` pinned to the real IP and to the alias (like the CGK prober: SNI
+  = name, certificate verified, no redirects followed). The name is **excluded** when the
+  real IP gives no HTTP answer (`000`: nothing serves HTTPS for it — Spectrum or another
+  non-web app) or the two status codes differ. A bad result is repeated once after 3 s, and
+  only a repeated one counts.
+* Names unseen for 7 days (ok) or 30 days (excluded) are forgotten.
+* When the excluded set changes (or the file is missing) the agent writes
+  `/etc/dnsdist/dnsjos/cgk-learned-exclude.txt` and calls `cgkReload()` — no restart.
+* After every run it posts `api.CGKLearnedReport{excluded[], checked, at}` to
+  `POST /agent/v1/cgk/learned`. The panel keeps the latest per node (`nodes.cgk_learned`,
+  `cgk_learned_checked`, `cgk_learned_at`, migration `0009`) and serves it at
+  `GET /api/v1/nodes/{id}/cgk/learned`, shown on the node's CGK tab.
+* Limits: a Spectrum app whose hostname also serves HTTPS on Cloudflare cannot be told
+  apart by an HTTP check (DNS never tells which port the client will use); keep such names
+  in `cgk.exclude`.
+
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 
 ### 7.1 Sources

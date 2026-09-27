@@ -115,9 +115,11 @@ addAction(blocked(), RCodeAction(DNSRCode.NOERROR), {name = "dnsjos-block-nodata
 -- Cloudflare -> CGK (Jakarta). A records inside the rewrite ranges are swapped
 -- for CGK alias IPs (stable per qname); names under EXCLUDE keep their real IPs.
 -- The agent's CGK prober maintains both files and calls cgkReload(); the lists
--- below are only the fallback when a file is missing.
+-- below are only the fallback when a file is missing. LEARNED_FILE lists names the agent
+-- found broken through an alias (Spectrum, IP-bound apps): those are never rewritten.
 local ALIAS_FILE = "/etc/dnsdist/dnsjos/cgk-aliases.txt"
 local REWRITE_FILE = "/etc/dnsdist/dnsjos/cgk-rewrite.txt"
+local LEARNED_FILE = "/etc/dnsdist/dnsjos/cgk-learned-exclude.txt"
 local DEFAULT_REWRITE = {"104.20.0.0/16", "104.21.0.0/16", "104.24.0.0/16", "104.25.0.0/16", "104.26.0.0/16", "104.27.0.0/16", "172.66.0.0/16", "172.67.0.0/16", "188.114.96.0/20"}
 local DEFAULT_ALIASES = {"104.19.240.127", "104.17.62.133", "104.17.48.2", "104.19.164.27", "172.64.81.207", "104.19.99.13", "104.18.129.121", "104.16.181.84"}
 local EXCLUDE = {"argotunnel.com", "cftunnel.com", "api.cloudflare.com", "cloudflareaccess.com", "cloudflareresearch.com", "acme-v02.api.letsencrypt.org", "engage.cloudflareclient.com", "time.cloudflare.com", "imap.hostinger.com", "smtp.hostinger.com", "help.stockbit.com", "chat.riotgames.com", "gitlab.com"}
@@ -141,11 +143,14 @@ local function readList(path, fallback, allowEmpty)
   return t
 end
 
-local rewriteNMG, aliasBytes = newNMG(), {}
+local rewriteNMG, aliasBytes, learned = newNMG(), {}, {}
 
--- (Re)load both lists; called by the agent over the console: cgkReload()
+-- (Re)load the lists; called by the agent over the console: cgkReload()
 function cgkReload()
-  local nmg, bytes = newNMG(), {}
+  local nmg, bytes, skip = newNMG(), {}, {}
+  local names = readList(LEARNED_FILE, {}, true)
+  for _, n in ipairs(names) do skip[n:lower()] = true end
+  learned = skip
   local ranges = readList(REWRITE_FILE, DEFAULT_REWRITE, true)
   for _, n in ipairs(ranges) do nmg:addMask(n) end
   for _, ip in ipairs(readList(ALIAS_FILE, DEFAULT_ALIASES)) do
@@ -156,9 +161,21 @@ function cgkReload()
   rewriteNMG, aliasBytes = nmg, bytes
   setMetric("cgk-aliases", #bytes)
   setMetric("cgk-rewrite-ranges", #ranges)
-  return string.format("cgk: %d aliases, %d rewrite ranges", #bytes, #ranges)
+  return string.format("cgk: %d aliases, %d rewrite ranges, %d learned exclusions", #bytes, #ranges, #names)
 end
 cgkReload()
+
+-- Rewritten names since the last cgkSeen(): name -> {real IP, alias IP, count}. Bounded:
+-- once full, new names wait for the next drain (every 10 min).
+local seen, seenN, SEEN_MAX = {}, 0, 2000
+
+-- Called by the agent over the console: "name real-ip alias-ip count" lines, then reset.
+function cgkSeen()
+  local out = {}
+  for n, e in pairs(seen) do out[#out + 1] = string.format("%s %s %s %d", n, e[1], e[2], e[3]) end
+  seen, seenN = {}, 0
+  return table.concat(out, "\n")
+end
 
 local excludeSMN = newSuffixMatchNode()
 for _, n in ipairs(EXCLUDE) do excludeSMN:add(newDNSName(n)) end
@@ -187,10 +204,16 @@ local function cgkRewrite(dr)
   end
   -- stable per name, so a site keeps the same aliases across queries
   local s, h = dr.qname:toString(), 0
+  local name = s:lower():gsub("%.$", "")
+  if learned[name] then -- keep counting it (IPs "-") so the agent knows it is still in use
+    local e = seen[name]
+    if e then e[3] = e[3] + 1 elseif seenN < SEEN_MAX then seen[name], seenN = { "-", "-", 1 }, seenN + 1 end
+    return DNSResponseAction.None, ""
+  end
   for i = 1, #s do h = (h * 31 + s:byte(i)) % 2147483647 end
   local nmg, aliases = rewriteNMG, aliasBytes
   if #aliases == 0 then return DNSResponseAction.None, "" end
-  local edits, k = {}, 0
+  local edits, k, realIP = {}, 0, nil
   for _ = 1, an do
     pos = skipName(p, pos)
     if not pos or pos + 9 > #p then break end
@@ -200,6 +223,7 @@ local function cgkRewrite(dr)
     if rtype == 1 and rdlen == 4 and rd + 3 <= #p then
       local ip = string.format("%d.%d.%d.%d", p:byte(rd, rd + 3))
       if nmg:match(newCA(ip)) then
+        realIP = realIP or ip
         edits[#edits + 1] = { rd, aliases[((h + k) % #aliases) + 1] }
         k = k + 1
       end
@@ -216,6 +240,13 @@ local function cgkRewrite(dr)
   out[#out + 1] = p:sub(last)
   dr:setContent(table.concat(out))
   incMetric("cgk-rewrites")
+  local e = seen[name]
+  if e then
+    e[3] = e[3] + 1
+  elseif seenN < SEEN_MAX then
+    seen[name] = { realIP, string.format("%d.%d.%d.%d", edits[1][2]:byte(1, 4)), 1 }
+    seenN = seenN + 1
+  end
   return DNSResponseAction.None, ""
 end
 
