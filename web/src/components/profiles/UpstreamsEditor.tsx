@@ -47,14 +47,14 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
           <div className="grid content-start gap-1.5">
             <Label htmlFor="upstream-policy">Policy</Label>
             <Select value={value.policy} onValueChange={(p) => onChange({ ...value, policy: p as ServerPolicy })} disabled={ro}>
-              <SelectTrigger id="upstream-policy" className="w-full" aria-invalid={policyErrs.length > 0 || undefined}>
+              <SelectTrigger id="upstream-policy" className="w-full min-w-0 *:data-[slot=select-value]:min-w-0 *:data-[slot=select-value]:overflow-hidden" aria-invalid={policyErrs.length > 0 || undefined}>
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
                 {POLICIES.map((p) => (
                   <SelectItem key={p} value={p}>
                     <span className="font-mono text-xs">{p}</span>
-                    <span className="text-muted-foreground">· {POLICY_INFO[p].label}</span>
+                    <span className="truncate text-muted-foreground">· {POLICY_INFO[p].label}</span>
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -63,7 +63,7 @@ export function UpstreamsEditor({ value, onChange }: { value: Upstreams; onChang
           </div>
           <dl className="grid gap-1.5 rounded-md border bg-muted/30 p-3 text-xs">
             {POLICIES.map((p) => (
-              <div key={p} className={cn('grid grid-cols-[8.5rem_1fr] gap-2', p !== value.policy && 'opacity-55')}>
+              <div key={p} className={cn('grid grid-cols-[9.5rem_1fr] gap-2', p !== value.policy && 'opacity-55')}>
                 <dt className={cn('font-mono', p === value.policy && 'font-semibold text-foreground')}>{p}</dt>
                 <dd className="text-muted-foreground">{POLICY_INFO[p].help}</dd>
               </div>

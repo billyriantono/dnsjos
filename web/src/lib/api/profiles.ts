@@ -110,7 +110,7 @@ export const POLICY_INFO: Record<ServerPolicy, { label: string; help: string; we
     weighted: true,
   },
   whashedLatency: {
-    label: 'Weighted hash, latency-aware',
+    label: 'Latency-aware hash',
     help: 'Like whashed, but a slow upstream’s weight shrinks in proportion to its latency (re-measured every second), so it gets fewer names until it recovers.',
     weighted: true,
   },
