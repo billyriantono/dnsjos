@@ -36,6 +36,8 @@ const (
 	CGKLearnState = DataDir + "/cgk-learned.json"
 	// DualStackState is the agent's memory of IPv4/IPv6 connect times per name.
 	DualStackState = DataDir + "/dualstack.json"
+	// FastestIPState is the agent's memory of per-address speeds (SPEC §6.9).
+	FastestIPState = DataDir + "/fastest-ip.json"
 )
 
 type Options struct {

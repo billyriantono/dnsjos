@@ -1,6 +1,7 @@
 package dnsconf
 
 import (
+	"cmp"
 	"fmt"
 	"net/netip"
 	"path"
@@ -25,6 +26,37 @@ const readListLua = `local function readList(path, fallback, allowEmpty)
   f:close()
   if #t == 0 and not allowEmpty then return fallback end
   return t
+end
+`
+
+// parse6Lua turns an IPv6 address into its 16 bytes (shared by the modules).
+const parse6Lua = `
+-- parse6 turns an IPv6 address into its 16 bytes (nil when malformed).
+local function parse6(s)
+  local function split(x)
+    local t = {}
+    for g in x:gmatch("[^:]+") do t[#t + 1] = g end
+    return t
+  end
+  local groups
+  local head, tail = s:match("^([%x:]-)::([%x:]*)$")
+  if head then
+    local h, t = split(head), split(tail)
+    if #h + #t > 7 then return nil end
+    groups = h
+    for _ = 1, 8 - #h - #t do groups[#groups + 1] = "0" end
+    for _, g in ipairs(t) do groups[#groups + 1] = g end
+  else
+    groups = split(s)
+  end
+  if #groups ~= 8 then return nil end
+  local b = {}
+  for _, g in ipairs(groups) do
+    if #g > 4 or not g:match("^%x+$") then return nil end
+    local v = tonumber(g, 16)
+    b[#b + 1] = string.char(math.floor(v / 256), v % 256)
+  end
+  return table.concat(b)
 end
 `
 
@@ -332,35 +364,8 @@ declareMetric("cgk-rewrite-ranges", "gauge", "Cloudflare ranges currently rewrit
 -- but empty file means "rewrite nothing" (every pool is already served by CGK).
 `)
 	s.WriteString(readListLua)
+	s.WriteString(parse6Lua)
 	s.WriteString(`
--- parse6 turns an IPv6 address into its 16 bytes (nil when malformed).
-local function parse6(s)
-  local function split(x)
-    local t = {}
-    for g in x:gmatch("[^:]+") do t[#t + 1] = g end
-    return t
-  end
-  local groups
-  local head, tail = s:match("^([%x:]-)::([%x:]*)$")
-  if head then
-    local h, t = split(head), split(tail)
-    if #h + #t > 7 then return nil end
-    groups = h
-    for _ = 1, 8 - #h - #t do groups[#groups + 1] = "0" end
-    for _, g in ipairs(t) do groups[#groups + 1] = g end
-  else
-    groups = split(s)
-  end
-  if #groups ~= 8 then return nil end
-  local b = {}
-  for _, g in ipairs(groups) do
-    if #g > 4 or not g:match("^%x+$") then return nil end
-    local v = tonumber(g, 16)
-    b[#b + 1] = string.char(math.floor(v / 256), v % 256)
-  end
-  return table.concat(b)
-end
-
 -- ip6str formats the 16 bytes of p starting at i (uncompressed, for newCA and logs).
 local function ip6str(p, i)
   local g = {}
@@ -567,6 +572,195 @@ addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), QTypeRule(DNSQType.AAAA)
     if #p >= 12 and p:byte(7) * 256 + p:byte(8) > 0 then note(dr.qname:toStringNoDot():lower()) end
     return DNSResponseAction.None, ""
   end), {name = "dnsjos-dualstack-seen"})
+`)
+	return []byte(s.String())
+}
+
+// renderFastestIP is smartdns' answer after its speed test (SPEC §6.9): the fastest
+// address first, then the others that are nearly as fast (_dns_rrs_add_all_best_ip), at
+// most max addresses, a CNAME chain flattened to one CNAME to the final name.
+func renderFastestIP(sc api.SpeedCheck, rt api.NodeRuntime) []byte {
+	var s strings.Builder
+	s.WriteString(Header)
+	fmt.Fprintf(&s, `-- Fastest-IP answers, smartdns' speed test (SPEC §6.9). fipSeen() reports names whose
+-- A/AAAA answers hold several addresses; the agent speed-checks every address, writes
+-- LIST_FILE ("name ip time ip time ...", 0.1 ms, -1 = no answer) and calls fipReload().
+-- Answers of listed names are rebuilt like smartdns' cached answer.
+local LIST_FILE = %s
+local MAX_IPS = %d
+
+declareMetric("fastest-ip-rewrites", "counter", "A/AAAA answers rebuilt with the fastest addresses")
+declareMetric("fastest-ip-names", "gauge", "Names with measured address speeds")
+`, luaString(path.Join(rt.BaseDir, FileFastestIPList)), cmp.Or(sc.MaxReplyIPNum, 8))
+	s.WriteString(readListLua)
+	s.WriteString(parse6Lua)
+	s.WriteString(skipNameLua)
+	s.WriteString(`
+local times, lines = {}, {} -- name -> { [rdata bytes] = time in 0.1 ms, -1 = no answer }; name -> its list line
+
+local function rdata(ip)
+  local a, b, c, d = ip:match("^(%d+)%.(%d+)%.(%d+)%.(%d+)$")
+  if a then return string.char(tonumber(a), tonumber(b), tonumber(c), tonumber(d)) end
+  return parse6(ip)
+end
+
+-- Called by the agent over the console: fipReload(). Answers are rebuilt before they are
+-- cached, and cache hits are not rebuilt, so the cached answers of every added, changed or
+-- removed name are flushed (smartdns updates its cache entry after the speed test).
+function fipReload()
+  local t, ls, n = {}, {}, 0
+  for _, l in ipairs(readList(LIST_FILE, {}, true)) do
+    local f = {}
+    for w in l:gmatch("%S+") do f[#f + 1] = w end
+    local m = {}
+    for i = 2, #f - 1, 2 do
+      local rd, v = rdata(f[i]), tonumber(f[i + 1])
+      if rd and v then m[rd] = v end
+    end
+    if f[1] then
+      local name = f[1]:lower()
+      t[name], ls[name], n = m, table.concat(f, " ", 2), n + 1
+    end
+  end
+  local cache, flushed = getPool(""):getCache(), 0
+  if cache then
+    local function flush(name)
+      if pcall(function() cache:expungeByName(newDNSName(name), DNSQType.ANY, false) end) then flushed = flushed + 1 end
+    end
+    for name, l in pairs(ls) do if lines[name] ~= l then flush(name) end end
+    for name in pairs(lines) do if not ls[name] then flush(name) end end
+  end
+  times, lines = t, ls
+  setMetric("fastest-ip-names", n)
+  return string.format("fastest-ip: %d names, %d flushed", n, flushed)
+end
+fipReload()
+
+-- Names with several addresses since the last fipSeen(): name -> count. Bounded: once
+-- full, new names wait for the next drain (every 10 min).
+local seen, seenN, SEEN_MAX = {}, 0, 2000
+
+-- Called by the agent over the console: "name count" lines, then reset.
+function fipSeen()
+  local out = {}
+  for n, c in pairs(seen) do out[#out + 1] = string.format("%s %d", n, c) end
+  seen, seenN = {}, 0
+  return table.concat(out, "\n")
+end
+
+local function u16(n) return string.char(math.floor(n / 256) % 256, n % 256) end
+local function u32(n) return u16(math.floor(n / 65536)) .. u16(n % 65536) end
+local function at16(p, i) return p:byte(i) * 256 + p:byte(i + 1) end
+
+-- readName returns the uncompressed wire name at pos (nil when malformed).
+local function readName(p, pos)
+  local out, jumps = {}, 0
+  while true do
+    local l = p:byte(pos)
+    if not l then return nil end
+    if l >= 192 then
+      local lo = p:byte(pos + 1)
+      jumps = jumps + 1
+      if not lo or jumps > 16 then return nil end
+      pos = (l - 192) * 256 + lo + 1
+    elseif l >= 64 then
+      return nil
+    elseif l == 0 then
+      out[#out + 1] = "\0"
+      return table.concat(out)
+    else
+      out[#out + 1] = p:sub(pos, pos + l)
+      pos = pos + l + 1
+    end
+  end
+end
+
+local function fastestIP(dr)
+  local p = dr:getContent()
+  if #p < 12 or at16(p, 5) ~= 1 or p:byte(3) % 4 >= 2 then return DNSResponseAction.None, "" end -- 1 question, not TC
+  local want, rdlen = 1, 4
+  if dr.qtype == DNSQType.AAAA then want, rdlen = 28, 16 end
+  local an, ns, ar = at16(p, 7), at16(p, 9), at16(p, 11)
+  local pos = skipName(p, 13)
+  if not pos or pos + 3 > #p then return DNSResponseAction.None, "" end
+  local qend = pos + 4 -- first byte after the question
+  pos = qend
+  local addrs, ttl, cttl, owner = {}, nil, nil, nil
+  for _ = 1, an do
+    local rr = pos
+    pos = skipName(p, pos)
+    if not pos or pos + 9 > #p then return DNSResponseAction.None, "" end
+    local t, rttl, rl = at16(p, pos), at16(p, pos + 4) * 65536 + at16(p, pos + 6), at16(p, pos + 8)
+    local rd = pos + 10
+    if rd + rl - 1 > #p then return DNSResponseAction.None, "" end
+    if t == 5 then
+      cttl = math.min(cttl or rttl, rttl)
+    elseif t == want and rl == rdlen then
+      addrs[#addrs + 1] = p:sub(rd, rd + rl - 1)
+      ttl = math.min(ttl or rttl, rttl)
+      owner = owner or rr
+    else
+      return DNSResponseAction.None, "" -- RRSIG, DNAME, ...: leave the answer alone
+    end
+    pos = rd + rl
+  end
+  if #addrs < 2 then return DNSResponseAction.None, "" end
+  local name = dr.qname:toStringNoDot():lower()
+  local n = seen[name]
+  if n then seen[name] = n + 1 elseif seenN < SEEN_MAX then seen[name], seenN = 1, seenN + 1 end
+  local m = times[name]
+  if not m then return DNSResponseAction.None, "" end
+
+  -- smartdns' _dns_rrs_add_all_best_ip: the fastest first; another address only when it
+  -- answered and is < 5 ms slower, within 10 % + 0.5 ms, or itself < 10 ms.
+  local best
+  for i, a in ipairs(addrs) do
+    local v = m[a]
+    if v and v >= 0 and (not best or v < m[addrs[best]]) then best = i end
+  end
+  if not best then return DNSResponseAction.None, "" end
+  local b = m[addrs[best]]
+  local pick = { addrs[best] }
+  for i, a in ipairs(addrs) do
+    if #pick >= MAX_IPS then break end
+    local v = m[a]
+    if i ~= best and v and v >= 0 and not (v - b >= 50 and b + math.floor(b / 10) + 5 < v and v >= 100) then
+      pick[#pick + 1] = a
+    end
+  end
+
+  -- keep only the EDNS OPT record of the additional section
+  local opt = ""
+  for i = 1, ns + ar do
+    local rr = pos
+    pos = skipName(p, pos)
+    if not pos or pos + 9 > #p then return DNSResponseAction.None, "" end
+    local fin = pos + 10 + at16(p, pos + 8)
+    if fin - 1 > #p then return DNSResponseAction.None, "" end
+    if i > ns and at16(p, pos) == 41 then opt = p:sub(rr, fin - 1) end
+    pos = fin
+  end
+
+  local out = { p:sub(1, 4), u16(1), u16(#pick + (cttl and 1 or 0)), u16(0), u16(opt ~= "" and 1 or 0), p:sub(13, qend - 1) }
+  local ownerPtr = "\192\12"
+  if cttl then -- smartdns answers one CNAME: the name -> the owner of the addresses
+    local target = readName(p, owner)
+    if not target then return DNSResponseAction.None, "" end
+    local off = qend - 1 + 12 -- 0-based offset of the CNAME's rdata
+    out[#out + 1] = "\192\12" .. u16(5) .. u16(1) .. u32(cttl) .. u16(#target) .. target
+    ownerPtr = string.char(192 + math.floor(off / 256), off % 256)
+  end
+  for _, a in ipairs(pick) do
+    out[#out + 1] = ownerPtr .. u16(want) .. u16(1) .. u32(ttl) .. u16(rdlen) .. a
+  end
+  out[#out + 1] = opt
+  dr:setContent(table.concat(out))
+  incMetric("fastest-ip-rewrites")
+  return DNSResponseAction.None, ""
+end
+
+addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), OrRule({QTypeRule(DNSQType.A), QTypeRule(DNSQType.AAAA)})}),
+                  LuaResponseAction(fastestIP), {name = "dnsjos-fastest-ip"})
 `)
 	return []byte(s.String())
 }

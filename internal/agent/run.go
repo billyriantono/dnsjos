@@ -24,6 +24,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/agent/dnsdist"
 	"github.com/billyriantono/dnsjos/internal/agent/dnstap"
 	"github.com/billyriantono/dnsjos/internal/agent/dualstack"
+	"github.com/billyriantono/dnsjos/internal/agent/speedcheck"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
@@ -93,7 +94,7 @@ func Run(ctx context.Context, o Options) error {
 	o.Log.Info("agent starting", "version", o.Version, "panel", a.cl.BaseURL, "root", o.Root, "no_systemd", o.NoSystemd)
 
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.cgkLearnLoop, a.dualStackLoop, a.inventoryLoop, a.allowlistLoop} {
+	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.cgkLearnLoop, a.dualStackLoop, a.fastestIPLoop, a.inventoryLoop, a.allowlistLoop} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
@@ -723,20 +724,20 @@ func (a *agent) cgkLearn(ctx context.Context, st cgk.LearnState) {
 	}
 }
 
-// ── Dual-stack selection ────────────────────────────────────────────────────
+// ── Speed check: dual-stack selection (SPEC §6.8) and fastest-IP answers (§6.9) ──
 
-const dualStackEvery = 10 * time.Minute
+const speedCheckEvery = 10 * time.Minute
 
-// dualStackLoop drains the names dualstack.lua saw AAAA answers for, measures the busiest
-// over IPv4 and IPv6 and keeps dnsjos/dualstack-prefer-ipv4.txt (read by dsReload()) current.
-func (a *agent) dualStackLoop(ctx context.Context) {
-	st := dualstack.State{}
-	if b, err := os.ReadFile(a.o.path(DualStackState)); err == nil {
+// speedCheckLoop runs a speed-check feature every 10 minutes with its state, persisted
+// in statePath between runs.
+func speedCheckLoop[S ~map[string]*E, E any](a *agent, ctx context.Context, statePath string, run func(context.Context, S)) {
+	st := S{}
+	if b, err := os.ReadFile(a.o.path(statePath)); err == nil {
 		if err := json.Unmarshal(b, &st); err != nil || st == nil {
-			st = dualstack.State{}
+			st = S{}
 		}
 	}
-	t := time.NewTicker(dualStackEvery)
+	t := time.NewTicker(speedCheckEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -744,75 +745,124 @@ func (a *agent) dualStackLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		a.dualStack(ctx, st)
+		run(ctx, st)
+		if ctx.Err() != nil {
+			return
+		}
+		if b, err := json.Marshal(st); err == nil {
+			if err := apply.WriteFile(a.o.path(statePath), b, 0o600); err != nil {
+				a.o.Log.Warn("speed check: saving state failed", "file", statePath, "err", err)
+			}
+		}
 	}
 }
 
-func (a *agent) dualStack(ctx context.Context, st dualstack.State) {
+func (a *agent) dualStackLoop(ctx context.Context) {
+	speedCheckLoop(a, ctx, DualStackState, a.dualStack)
+}
+
+func (a *agent) fastestIPLoop(ctx context.Context) {
+	speedCheckLoop(a, ctx, FastestIPState, a.fastestIP)
+}
+
+// speedCheckSpec returns the applied spec when on(spec), and drains the module's seen
+// names with the console function seenFn ("dsSeen()", "fipSeen()").
+func (a *agent) speedCheckSpec(ctx context.Context, on func(api.ConfigSpec) bool, seenFn string) (api.ConfigSpec, map[string]int64, bool) {
 	a.mu.Lock()
 	var spec api.ConfigSpec
-	on := a.cfg != nil && a.cfg.Spec.DualStack.Enabled && a.applied != 0
-	if on {
+	ok := a.cfg != nil && a.applied != 0 && on(a.cfg.Spec)
+	if ok {
 		spec = a.cfg.Spec
 	}
 	a.mu.Unlock()
-	if !on {
-		return
+	if !ok {
+		return spec, nil, false
 	}
-	out, err := dnsdist.Console(ctx, a.app.Conf(), "dsSeen()")
+	out, err := dnsdist.Console(ctx, a.app.Conf(), seenFn)
 	if err != nil {
 		if ctx.Err() == nil && !(errors.Is(err, dnsdist.ErrNoBinary) && a.o.NoSystemd) {
-			a.o.Log.Debug("dualstack: dsSeen() failed", "err", err)
+			a.o.Log.Debug("speed check: console failed", "cmd", seenFn, "err", err)
 		}
+		return spec, nil, false
+	}
+	return spec, speedcheck.ParseSeen(out), true
+}
+
+type listFile struct {
+	rel, why string
+	lines    []string
+}
+
+// writeLists writes the files whose content changed and then calls reloadFn over the
+// console; it returns the reload's output ("" when nothing changed).
+func (a *agent) writeLists(ctx context.Context, now time.Time, reloadFn string, files ...listFile) (string, error) {
+	changed := false
+	for _, f := range files {
+		path := filepath.Join(a.o.path(DnsdistDir), f.rel)
+		if _, err := os.Stat(path); err == nil && slices.Equal(cgk.ReadList(path), f.lines) {
+			continue
+		}
+		if err := apply.WriteFile(path, cgk.Format(f.why, now, f.lines), 0o644); err != nil {
+			return "", err
+		}
+		changed = true
+	}
+	if !changed {
+		return "", nil
+	}
+	return dnsdist.Console(ctx, a.app.Conf(), reloadFn)
+}
+
+func (a *agent) dualStack(ctx context.Context, st dualstack.State) {
+	spec, seen, ok := a.speedCheckSpec(ctx, func(s api.ConfigSpec) bool { return s.DualStack.Enabled }, "dsSeen()")
+	if !ok {
 		return
 	}
 	now := time.Now().UTC()
-	pr := dualstack.ParamsOf(spec.DualStack)
+	pr := dualstack.ParamsOf(spec)
 	v4, v6 := []dualstack.Item{}, []dualstack.Item{}
-	ready := dualstack.IPv6Ready()
+	ready := speedcheck.IPv6Ready()
 	if ready { // no IPv6 route here: every name would look IPv4-only (smartdns turns the feature off too)
 		// Resolve through the node's own first upstream: the answers its clients get.
-		p := dualstack.NetProber{Resolver: spec.Upstreams.Servers[0].Address}
-		dualstack.Update(ctx, p, st, dualstack.ParseSeen(out), pr, now)
+		p := speedcheck.NetProber{Resolver: spec.Upstreams.Servers[0].Address}
+		dualstack.Update(ctx, p, st, seen, pr, now)
 		if ctx.Err() != nil {
 			return
 		}
 		v4, v6 = st.Lists(pr)
 	}
-	if b, err := json.Marshal(st); err == nil {
-		if err := apply.WriteFile(a.o.path(DualStackState), b, 0o600); err != nil {
-			a.o.Log.Warn("dualstack: saving state failed", "err", err)
-		}
-	}
 	defer a.postDualStack(ctx, st, pr, ready, v4, v6, now)
+	out, err := a.writeLists(ctx, now, "dsReload()",
+		listFile{dnsconf.FileDualStackPreferV4, "names faster over IPv4 from this node: AAAA answered NODATA (name ttl)", dualstack.Lines(v4)},
+		listFile{dnsconf.FileDualStackPreferV6, "names faster over IPv6 from this node: A answered NODATA (name ttl)", dualstack.Lines(v6)})
+	switch {
+	case err != nil:
+		a.o.Log.Warn("dualstack: applying the lists failed", "err", err)
+	case out != "":
+		a.o.Log.Info("dualstack lists updated", "prefer_ipv4", len(v4), "prefer_ipv6", len(v6), "dnsdist", out)
+	}
+}
 
-	dir := a.o.path(DnsdistDir)
-	files := []struct {
-		rel, why string
-		items    []dualstack.Item
-	}{
-		{dnsconf.FileDualStackPreferV4, "names faster over IPv4 from this node: AAAA answered NODATA (name ttl)", v4},
-		{dnsconf.FileDualStackPreferV6, "names faster over IPv6 from this node: A answered NODATA (name ttl)", v6},
-	}
-	changed := false
-	for _, f := range files {
-		path, lines := filepath.Join(dir, f.rel), dualstack.Lines(f.items)
-		if _, err := os.Stat(path); err == nil && slices.Equal(cgk.ReadList(path), lines) {
-			continue
-		}
-		if err := apply.WriteFile(path, cgk.Format(f.why, now, lines), 0o644); err != nil {
-			a.o.Log.Warn("dualstack: writing the list failed", "err", err)
-			return
-		}
-		changed = true
-	}
-	if !changed {
+func (a *agent) fastestIP(ctx context.Context, st speedcheck.State) {
+	spec, seen, ok := a.speedCheckSpec(ctx, func(s api.ConfigSpec) bool { return s.SpeedCheck.FastestIP }, "fipSeen()")
+	if !ok {
 		return
 	}
-	if out, err = dnsdist.Console(ctx, a.app.Conf(), "dsReload()"); err != nil {
-		a.o.Log.Warn("dualstack: dsReload() failed", "err", err)
-	} else {
-		a.o.Log.Info("dualstack lists updated", "prefer_ipv4", len(v4), "prefer_ipv6", len(v6), "dnsdist", out)
+	now := time.Now().UTC()
+	methods, _ := api.ParseSpeedCheckMode(spec.SpeedCheck.Mode)
+	p := speedcheck.NetProber{Resolver: spec.Upstreams.Servers[0].Address}
+	speedcheck.Update(ctx, p, st, seen, methods, speedcheck.Names(spec.SpeedCheck.Exclude), speedcheck.IPv6Ready(), now)
+	if ctx.Err() != nil {
+		return
+	}
+	lines := st.Lines()
+	out, err := a.writeLists(ctx, now, "fipReload()",
+		listFile{dnsconf.FileFastestIPList, "address speeds measured from this node (name ip time-0.1ms ...)", lines})
+	switch {
+	case err != nil:
+		a.o.Log.Warn("fastest-ip: applying the list failed", "err", err)
+	case out != "":
+		a.o.Log.Info("fastest-ip list updated", "names", len(lines), "measured", st.Checked(), "dnsdist", out)
 	}
 }
 

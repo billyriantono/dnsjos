@@ -29,6 +29,7 @@ export const TABS = [
   { id: 'blocking', label: 'Blocking', keys: ['blocking'] },
   { id: 'abuse', label: 'Abuse', keys: ['abuse'] },
   { id: 'cgk', label: 'CGK', keys: ['cgk'] },
+  { id: 'speed_check', label: 'Speed check', keys: ['speed_check'] },
   { id: 'dualstack', label: 'Dual-stack', keys: ['dualstack'] },
   { id: 'analytics', label: 'Analytics', keys: ['analytics'] },
   { id: 'tuning', label: 'Tuning', keys: ['tuning', 'webserver'] },

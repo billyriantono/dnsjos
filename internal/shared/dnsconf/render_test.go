@@ -34,6 +34,10 @@ func TestGolden(t *testing.T) {
 			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
 			s.DualStack.Enabled = true
 		},
+		"fastest_ip": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.SpeedCheck.FastestIP, s.SpeedCheck.MaxReplyIPNum = true, 4
+		},
 		"response_ips": func(s *api.ConfigSpec) { // opt-in (off by default)
 			s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false
 			s.Blocking.BlockResponseIPs = true

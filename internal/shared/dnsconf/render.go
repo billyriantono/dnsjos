@@ -43,6 +43,9 @@ const (
 	// Names the agent found broken through a CGK alias (SPEC §6.6), never rendered.
 	FileCGKLearned = "dnsjos/cgk-learned-exclude.txt"
 	FileDualStack  = "dnsjos/dualstack.lua"
+	FileFastestIP  = "dnsjos/fastest-ip.lua"
+	// Per-address speeds the agent measured (never rendered).
+	FileFastestIPList = "dnsjos/fastest-ip.txt"
 	// Names the agent measured faster over IPv4 / IPv6 (never rendered).
 	FileDualStackPreferV4 = "dnsjos/dualstack-prefer-ipv4.txt"
 	FileDualStackPreferV6 = "dnsjos/dualstack-prefer-ipv6.txt"
@@ -181,7 +184,7 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		files[rel] = body
 		w("dofile(%s)\n", luaString(path.Join(rt.BaseDir, rel)))
 	}
-	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled {
+	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled || spec.SpeedCheck.FastestIP {
 		c.WriteString("\n")
 	}
 	if spec.Blocking.Enabled {
@@ -207,6 +210,9 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 	}
 	if spec.DualStack.Enabled {
 		module(FileDualStack, renderDualStack(rt))
+	}
+	if spec.SpeedCheck.FastestIP {
+		module(FileFastestIP, renderFastestIP(spec.SpeedCheck, rt))
 	}
 	if an := spec.Analytics; an.Enabled {
 		ap, err := addrPort(an.StreamAddr)

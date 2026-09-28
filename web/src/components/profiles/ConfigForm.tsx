@@ -54,7 +54,7 @@ export function ConfigForm({
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
   const { do53, doh, dot, tls } = s.listen
-  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds } = s
+  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc } = s
 
   return (
     <Tabs value={tab} onValueChange={(t) => onTabChange(t as TabId)} className="gap-4">
@@ -292,10 +292,51 @@ export function ConfigForm({
         </Section>
       </TabsContent>
 
+      <TabsContent value="speed_check" className="grid gap-4">
+        <Section title="Speed check" description="smartdns speed-check-mode: how the agent measures addresses, for fastest-IP answers and dual-stack selection.">
+          <TextField
+            className="max-w-md"
+            label="Mode"
+            path="speed_check.mode"
+            value={sc.mode}
+            onChange={(mode) => part('speed_check', { mode })}
+            placeholder="ping,tcp:80,tcp:443"
+            help="ping (ICMP) or tcp:<port>, in order. The next method starts 100 ms later if no address answered yet; the fastest answer wins, slower than 950 ms counts as no answer. none = no speed test."
+          />
+        </Section>
+        <Section
+          title="Fastest-IP answers"
+          description="smartdns' answer after its speed test (the one it caches in every response-mode). Every 10 minutes the agent speed-checks every address of the busiest names with several addresses. Their A/AAAA answers then list the fastest address first, then only the ones nearly as fast (< 5 ms slower, within 10 % + 0.5 ms, or < 10 ms); addresses that did not answer are dropped and a CNAME chain becomes one CNAME. dnsdist cannot hold a query while it measures, so the first answers of a new name pass through unchanged, like smartdns' fastest-response."
+          enabled={sc.fastest_ip}
+          onEnabledChange={(fastest_ip) => part('speed_check', { fastest_ip })}
+        >
+          <Grid>
+            <NumField
+              label="Max addresses"
+              path="speed_check.max_reply_ip_num"
+              value={sc.max_reply_ip_num}
+              onChange={(max_reply_ip_num) => part('speed_check', { max_reply_ip_num })}
+              min={0}
+              max={64}
+              help="max-reply-ip-num: at most this many addresses per answer. 0 = 8."
+            />
+          </Grid>
+          <ListEditor
+            label="Exclude"
+            path="speed_check.exclude"
+            value={sc.exclude}
+            onChange={(exclude) => part('speed_check', { exclude })}
+            validate={isHostname}
+            what="domain"
+            help="Names (and their subdomains) whose answers are never reordered (domain-rules -speed-check-mode none)."
+          />
+        </Section>
+      </TabsContent>
+
       <TabsContent value="dualstack" className="grid gap-4">
         <Section
           title="Dual-stack IP selection"
-          description="smartdns dualstack-ip-selection. Every 10 minutes the agent speed-checks the names clients get AAAA answers for over IPv4 and IPv6. When IPv4 is faster by at least the threshold, or IPv6 does not answer, AAAA queries for the name get NODATA (with an SOA, like smartdns) so clients use IPv4. Only enable it on nodes whose IPv6 path is the same as their clients' (the node measures on their behalf)."
+          description="smartdns dualstack-ip-selection. Every 10 minutes the agent speed-checks the names clients get AAAA answers for over IPv4 and IPv6. When IPv4 is faster by at least the threshold, or IPv6 does not answer, AAAA queries for the name get NODATA (with an SOA, like smartdns) so clients use IPv4. Measured with the Speed check tab's mode. Only enable it on nodes whose IPv6 path is the same as their clients' (the node measures on their behalf)."
           enabled={ds.enabled}
           onEnabledChange={(enabled) => part('dualstack', { enabled })}
         >
@@ -309,14 +350,6 @@ export function ConfigForm({
               max={1000}
               unit="ms"
               help="dualstack-ip-selection-threshold: the faster family must win by at least this much. 0 = 10 ms."
-            />
-            <TextField
-              label="Speed check mode"
-              path="dualstack.speed_check_mode"
-              value={ds.speed_check_mode}
-              onChange={(speed_check_mode) => part('dualstack', { speed_check_mode })}
-              placeholder="ping,tcp:80,tcp:443"
-              help="speed-check-mode: ping (ICMP) or tcp:<port>. The next method starts 100 ms later if no address answered yet; the fastest answer wins. none = no speed test (nothing dropped)."
             />
             <SwitchField
               label="Allow force AAAA"

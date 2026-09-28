@@ -1,4 +1,4 @@
-package dualstack
+package speedcheck
 
 import (
 	"bytes"

@@ -95,8 +95,15 @@ export interface DualStack {
   enabled: boolean
   threshold_ms: number // 0..1000, 0 = 10 (dualstack-ip-selection-threshold)
   allow_force_aaaa: boolean // also drop A when IPv6 is faster (dualstack-ip-allow-force-AAAA)
-  speed_check_mode: string // "ping,tcp:80,tcp:443" (speed-check-mode)
   exclude: string[] // names + subdomains never touched
+}
+
+/** SPEC §6.9: smartdns speed test (shared with dual-stack) and fastest-IP answers. */
+export interface SpeedCheck {
+  mode: string // speed-check-mode: "ping,tcp:80,tcp:443" | "none" | …
+  fastest_ip: boolean
+  max_reply_ip_num: number // 0..64, 0 = 8
+  exclude: string[]
 }
 
 /** SPEC §6.8: a name whose A or AAAA answers the node drops. */
@@ -143,6 +150,7 @@ export interface ConfigSpec {
   blocking: Blocking
   abuse: Abuse
   cgk: CGK
+  speed_check: SpeedCheck
   dualstack: DualStack
   tuning: Tuning
   webserver: Webserver

@@ -10,17 +10,18 @@ import (
 
 // ConfigSpec is the desired state of a dnsdist node (SPEC §6).
 type ConfigSpec struct {
-	Listen    Listen    `json:"listen"`
-	ACL       []string  `json:"acl"`
-	Upstreams Upstreams `json:"upstreams"`
-	Cache     Cache     `json:"cache"`
-	Blocking  Blocking  `json:"blocking"`
-	Abuse     Abuse     `json:"abuse"`
-	CGK       CGK       `json:"cgk"`
-	DualStack DualStack `json:"dualstack"`
-	Tuning    Tuning    `json:"tuning"`
-	Webserver Webserver `json:"webserver"`
-	Analytics Analytics `json:"analytics"`
+	Listen     Listen     `json:"listen"`
+	ACL        []string   `json:"acl"`
+	Upstreams  Upstreams  `json:"upstreams"`
+	Cache      Cache      `json:"cache"`
+	Blocking   Blocking   `json:"blocking"`
+	Abuse      Abuse      `json:"abuse"`
+	CGK        CGK        `json:"cgk"`
+	SpeedCheck SpeedCheck `json:"speed_check"`
+	DualStack  DualStack  `json:"dualstack"`
+	Tuning     Tuning     `json:"tuning"`
+	Webserver  Webserver  `json:"webserver"`
+	Analytics  Analytics  `json:"analytics"`
 }
 
 type Listen struct {
@@ -123,32 +124,45 @@ type DualStack struct {
 	ThresholdMs int `json:"threshold_ms"`
 	// Also drop A answers when IPv6 is faster (dualstack-ip-allow-force-AAAA).
 	AllowForceAAAA bool `json:"allow_force_aaaa"`
-	// Probe methods tried in order until one answers (speed-check-mode; "" = default).
-	SpeedCheckMode string `json:"speed_check_mode"`
 	// Names (and their subdomains) never touched (domain-rules -dualstack-ip-selection no).
+	Exclude []string `json:"exclude"`
+}
+
+// SpeedCheck is smartdns' speed test (SPEC §6.9): how the agent measures addresses (used by
+// DualStack too) and whether A/AAAA answers are reduced to the fastest addresses, which is
+// the answer smartdns caches and serves in every response-mode.
+type SpeedCheck struct {
+	// Probe methods (speed-check-mode; "" = DefaultSpeedCheckMode, "none" = no speed test).
+	Mode string `json:"mode"`
+	// Answer with the fastest address first plus the ones nearly as fast (smartdns).
+	FastestIP bool `json:"fastest_ip"`
+	// At most this many addresses per answer (max-reply-ip-num; 0 = 8).
+	MaxReplyIPNum int `json:"max_reply_ip_num"`
+	// Names (and their subdomains) whose answers are never reordered
+	// (domain-rules -speed-check-mode none).
 	Exclude []string `json:"exclude"`
 }
 
 // DefaultSpeedCheckMode is smartdns' default speed-check-mode.
 const DefaultSpeedCheckMode = "ping,tcp:80,tcp:443"
 
-// SpeedCheck is one probe method: ICMP echo (Port 0) or a TCP connect to Port.
-type SpeedCheck struct{ Port int }
+// SpeedCheckMethod is one probe method: ICMP echo (Port 0) or a TCP connect to Port.
+type SpeedCheckMethod struct{ Port int }
 
 // ParseSpeedCheckMode parses "ping,tcp:80,tcp:443" ("" = DefaultSpeedCheckMode). "none"
-// (no speed check) returns no methods: nothing is ever measured faster, nothing dropped.
-func ParseSpeedCheckMode(s string) ([]SpeedCheck, error) {
+// (no speed test) returns no methods: nothing is measured, so nothing is changed.
+func ParseSpeedCheckMode(s string) ([]SpeedCheckMethod, error) {
 	switch strings.TrimSpace(s) {
 	case "":
 		s = DefaultSpeedCheckMode
 	case "none":
-		return []SpeedCheck{}, nil
+		return []SpeedCheckMethod{}, nil
 	}
-	var out []SpeedCheck
+	var out []SpeedCheckMethod
 	for _, f := range strings.Split(s, ",") {
 		f = strings.TrimSpace(f)
 		if f == "ping" {
-			out = append(out, SpeedCheck{})
+			out = append(out, SpeedCheckMethod{})
 			continue
 		}
 		p, ok := strings.CutPrefix(f, "tcp:")
@@ -156,7 +170,7 @@ func ParseSpeedCheckMode(s string) ([]SpeedCheck, error) {
 		if !ok || err != nil || n < 1 || n > 65535 {
 			return nil, fmt.Errorf("%q is not ping or tcp:<port>", f)
 		}
-		out = append(out, SpeedCheck{Port: n})
+		out = append(out, SpeedCheckMethod{Port: n})
 	}
 	return out, nil
 }
@@ -249,9 +263,10 @@ func DefaultConfigSpec() ConfigSpec {
 			},
 			AliasesWanted: 8, MinOK: 3, RefreshIntervalH: 6,
 		},
-		DualStack: DualStack{ThresholdMs: 10, SpeedCheckMode: DefaultSpeedCheckMode, Exclude: []string{}}, // opt-in: see DualStack
-		Tuning:    Tuning{UDPBufferBytes: 16777216},
-		Webserver: Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},
-		Analytics: DefaultAnalytics(),
+		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
+		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                // opt-in: see DualStack
+		Tuning:     Tuning{UDPBufferBytes: 16777216},
+		Webserver:  Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},
+		Analytics:  DefaultAnalytics(),
 	}
 }

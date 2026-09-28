@@ -215,10 +215,15 @@ panel on save and in the agent before rendering.
     "exclude": ["argotunnel.com", "gitlab.com", "…"],
     "aliases_wanted": 8, "min_ok": 3, "refresh_interval_h": 6
   },
+  "speed_check": {                  // §6.9: smartdns speed test
+    "mode": "ping,tcp:80,tcp:443",                   // speed-check-mode ("" = this, "none"); also §6.8
+    "fastest_ip": false,                             // opt-in: answers keep only the fastest addresses
+    "max_reply_ip_num": 8,                           // 0 = 8, 0..64
+    "exclude": []                                    // names + subdomains never reordered
+  },
   "dualstack": {                    // §6.8, opt-in: smartdns dualstack-ip-selection
     "enabled": false, "threshold_ms": 10,            // 0 = 10 ms, 0..1000
     "allow_force_aaaa": false,                       // also drop A when IPv6 is faster
-    "speed_check_mode": "ping,tcp:80,tcp:443",       // "" = this default
     "exclude": []                                    // names + subdomains never touched
   },
   "tuning": {"udp_buffer_bytes": 16777216, "tcp_workers": 0, "extra_lua": ""},
@@ -452,19 +457,14 @@ dual-stack clients still pick IPv6. With `dualstack.enabled` the node behaves li
 |---|---|
 | `dualstack-ip-selection-threshold` (ms) | `threshold_ms` (0 = 10, smartdns' default) |
 | `dualstack-ip-allow-force-AAAA` | `allow_force_aaaa` |
-| `speed-check-mode ping,tcp:80,tcp:443` | `speed_check_mode`, same syntax and default |
+| `speed-check-mode ping,tcp:80,tcp:443` | `speed_check.mode` (§6.9), same syntax and default |
 | `domain-rules /x/ -dualstack-ip-selection no` | `exclude` (name + subdomains) |
 | IPv6 readiness probe; no IPv6 route = feature off | same: no IPv6 route = empty lists |
 
 * Decision (`_dns_server_force_dualstack`): both families have addresses, the kept family
   answered its speed check, and the other one did not or was slower by ≥ threshold. AAAA is
   dropped when IPv4 wins; A only with `allow_force_aaaa` when IPv6 wins.
-* Speed check (`_dns_server_second_ping_check`): every address (max 16 per family) with the
-  first method; each later method starts 100 ms after the previous one (smartdns'
-  `DNS_PING_CHECK_INTERVAL`; its docs say 200 ms) unless an address already answered. Every
-  answer within 950 ms of the start (`DNS_PING_TIMEOUT`, ≥ 200 ms per probe) counts, the
-  fastest wins. `ping` is an ICMP echo (unprivileged socket, else raw); `none` = no speed
-  test, so nothing is dropped (smartdns: no ping result, no dual-stack decision).
+* Speed check: §6.9, the fastest answer of each family counts (the request's `ping_time`).
 * Reply: what smartdns sends for a forced SOA — NOERROR, no answer, and in the authority
   section `<qname> <ttl> SOA a.gtld-servers.net. nstld.verisign-grs.com. 1800 1800 900
   604800 86400`, TTL = the dropped RRset's TTL. It is built before the cache, so a cached
@@ -483,6 +483,41 @@ dual-stack clients still pick IPv6. With `dualstack.enabled` the node behaves li
   (migration `0011`) → `GET /api/v1/nodes/{id}/dualstack` → node page, Dual-stack tab.
 * The node measures on its clients' behalf, so this is only right on nodes that share their
   clients' IPv6 path. Off by default; enable it per profile or per node (§6.3).
+
+### 6.9 Speed check and fastest-IP answers
+
+smartdns' speed test (`speed-check-mode`) and the answer it builds from it. Package
+`internal/agent/speedcheck` measures for both this section and dual-stack (§6.8).
+
+* Speed check (`_dns_server_second_ping_check`): every address (max 16 per family) with the
+  first method; each later method starts 100 ms after the previous one (smartdns'
+  `DNS_PING_CHECK_INTERVAL`; its docs say 200 ms) unless an address already answered. Every
+  answer within 950 ms of the start (`DNS_PING_TIMEOUT`, ≥ 200 ms per probe) counts. An
+  address answering twice keeps its later answer (`addr_map->ping_time`); the fastest answer
+  overall is the request's `ping_time`. `ping` is an ICMP echo (unprivileged socket, else
+  raw); `none` = no speed test, nothing is changed. IPv6 addresses are only probed when the
+  node has an IPv6 route.
+* Fastest-IP answers (`speed_check.fastest_ip`, off by default) are the answer smartdns
+  caches after its speed test in every `response-mode` (`_dns_rrs_add_all_best_ip`): the
+  fastest address first, then, in upstream order, each other address that answered and is
+  < 5 ms slower, within 10 % + 0.5 ms of the fastest, or itself < 10 ms; at most
+  `max_reply_ip_num` (`max-reply-ip-num`, 8). Addresses that did not answer or were not
+  measured are left out; when none of an answer's addresses was measured it passes
+  unchanged (e.g. CGK aliases, §6.5). A CNAME chain becomes one CNAME from the name to the
+  owner of the addresses (TTL = the chain's lowest), address TTL = the RRset's lowest,
+  authority dropped, EDNS OPT kept. Answers with other records (RRSIG, DNAME, …),
+  truncated ones and single-address ones pass unchanged.
+* `response-mode` only decides how long smartdns holds the *first* query (first-ping:
+  until the first ping, fastest-ip: all pings, fastest-response: not at all). dnsdist
+  cannot hold a query, so DnsJos always behaves like fastest-response for a new name: its
+  first answers pass unchanged and are measured in the background.
+* `fastest-ip.lua` rebuilds the answers of listed names in a response rule and counts
+  names with ≥ 2 addresses (`fipSeen()`). Every 10 min the agent measures the 100 busiest
+  due names (resolved through the first upstream, re-measured hourly, forgotten after 7 days
+  unseen; state `/var/lib/dnsjos/fastest-ip.json`) and writes `dnsjos/fastest-ip.txt`
+  ("name ip time …", 0.1 ms, -1 = no answer). `fipReload()` flushes the cached answers of
+  every added, changed or removed name, since cache hits are not rebuilt. Metrics:
+  `fastest-ip-rewrites`, `fastest-ip-names`.
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 
