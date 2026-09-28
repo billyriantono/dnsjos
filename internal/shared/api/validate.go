@@ -166,6 +166,12 @@ func (s ConfigSpec) Validate() error {
 	hostnames("cgk.test_sites", g.TestSites)
 	hostnames("cgk.exclude", g.Exclude)
 
+	between("dualstack.threshold_ms", s.DualStack.ThresholdMs, 0, 1000)
+	if _, err := ParseSpeedCheckMode(s.DualStack.SpeedCheckMode); err != nil {
+		bad("dualstack.speed_check_mode", "%v", err)
+	}
+	hostnames("dualstack.exclude", s.DualStack.Exclude)
+
 	between("tuning.udp_buffer_bytes", s.Tuning.UDPBufferBytes, 0, 1<<30)
 	between("tuning.tcp_workers", s.Tuning.TCPWorkers, 0, 1024)
 

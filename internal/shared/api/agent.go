@@ -226,6 +226,26 @@ type CGKLearnedReport struct {
 	At       time.Time    `json:"at"`
 }
 
+// DualStackName is one name whose A or AAAA answers the node drops (SPEC §6.8).
+type DualStackName struct {
+	Name   string  `json:"name"`
+	Prefer string  `json:"prefer"` // "ipv4" (AAAA dropped) or "ipv6" (A dropped, allow_force_aaaa)
+	V4Ms   float64 `json:"v4_ms"`  // fastest speed check, -1 = no answer
+	V6Ms   float64 `json:"v6_ms"`
+	TTL    uint32  `json:"ttl"` // of the NODATA answer (the dropped RRset's TTL)
+	Hits   int64   `json:"hits"`
+	// CheckedAt is the last measurement.
+	CheckedAt time.Time `json:"checked_at"`
+}
+
+// DualStackReport is POST /agent/v1/dualstack: the node's dual-stack selection.
+type DualStackReport struct {
+	Names   []DualStackName `json:"names"`
+	Checked int             `json:"checked"` // names measured at least once
+	IPv6    bool            `json:"ipv6"`    // the node has an IPv6 route (false: nothing is dropped)
+	At      time.Time       `json:"at"`
+}
+
 type CGKPool struct {
 	Net   string   `json:"net"`
 	Colos []string `json:"colos"`

@@ -752,3 +752,24 @@ func TestHeartbeatGapSpread(t *testing.T) {
 		t.Fatalf("after normal hb: rows %d sum %d", rows, sum)
 	}
 }
+
+// SPEC §6.8: the latest dual-stack selection per node.
+func TestDualStackReport(t *testing.T) {
+	e := setup(t)
+	er := e.enroll("dns-dual")
+	var rep api.DualStackReport
+	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID+"/dualstack", "admin", nil, &rep)
+	if rep.Names == nil || len(rep.Names) != 0 || !rep.At.IsZero() || rep.IPv6 {
+		t.Fatalf("before any report: %+v", rep)
+	}
+	at := time.Now().UTC().Truncate(time.Second)
+	e.call(204, "POST", "/agent/v1/dualstack", er.NodeToken, api.DualStackReport{At: at, Checked: 7, IPv6: true, Names: []api.DualStackName{
+		{Name: "dns.google", Prefer: "ipv4", V4Ms: 5.2, V6Ms: 150, TTL: 60, Hits: 3, CheckedAt: at}}}, nil)
+	e.call(401, "POST", "/agent/v1/dualstack", "", api.DualStackReport{}, nil)
+	e.call(200, "GET", "/api/v1/nodes/"+er.NodeID+"/dualstack", "admin", nil, &rep)
+	if rep.Checked != 7 || !rep.IPv6 || len(rep.Names) != 1 || rep.Names[0].Name != "dns.google" || rep.Names[0].V4Ms != 5.2 ||
+		rep.Names[0].Prefer != "ipv4" || rep.Names[0].TTL != 60 || !rep.At.Equal(at) {
+		t.Fatalf("after report: %+v", rep)
+	}
+	e.call(404, "GET", "/api/v1/nodes/00000000-0000-0000-0000-000000000000/dualstack", "admin", nil, nil)
+}

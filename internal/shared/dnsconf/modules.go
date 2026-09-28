@@ -486,3 +486,87 @@ addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), OrRule({QTypeRule(DNSQTy
 `)
 	return []byte(s.String()), nil
 }
+
+func renderDualStack(rt api.NodeRuntime) []byte {
+	var s strings.Builder
+	s.WriteString(Header)
+	fmt.Fprintf(&s, `-- Dual-stack selection, smartdns' dualstack-ip-selection (SPEC §6.8). The agent
+-- measures the names dsSeen() reports over IPv4 and IPv6 and lists the losers:
+-- PREFER_V4_FILE (AAAA dropped) and PREFER_V6_FILE (A dropped, allow_force_aaaa), one
+-- "name ttl" per line, then calls dsReload(). A dropped answer is what smartdns sends:
+-- NODATA with an SOA for the name in the authority section, TTL = the real record's.
+local PREFER_V4_FILE = %s
+local PREFER_V6_FILE = %s
+
+declareMetric("dualstack-suppressed", "counter", "A/AAAA queries answered NODATA because the other family is faster")
+declareMetric("dualstack-names", "gauge", "Names currently answered over one address family only")
+`, luaString(path.Join(rt.BaseDir, FileDualStackPreferV4)), luaString(path.Join(rt.BaseDir, FileDualStackPreferV6)))
+	s.WriteString(readListLua)
+	s.WriteString(`
+local drop = { [1] = {}, [28] = {} } -- qtype -> name -> TTL
+
+-- Called by the agent over the console: dsReload()
+function dsReload()
+  local function load(file)
+    local t, n = {}, 0
+    for _, l in ipairs(readList(file, {}, true)) do
+      local name, ttl = l:match("^(%S+)%s+(%d+)$")
+      if name then t[name:lower()], n = tonumber(ttl), n + 1 end
+    end
+    return t, n
+  end
+  local v4, n4 = load(PREFER_V4_FILE)
+  local v6, n6 = load(PREFER_V6_FILE)
+  drop = { [1] = v6, [28] = v4 }
+  setMetric("dualstack-names", n4 + n6)
+  return string.format("dualstack: %d names prefer IPv4, %d prefer IPv6", n4, n6)
+end
+dsReload()
+
+-- Names with AAAA answers (or dropped queries) since the last dsSeen(): name -> count.
+-- Bounded: once full, new names wait for the next drain (every 10 min).
+local seen, seenN, SEEN_MAX = {}, 0, 2000
+local function note(name)
+  local n = seen[name]
+  if n then seen[name] = n + 1 elseif seenN < SEEN_MAX then seen[name], seenN = 1, seenN + 1 end
+end
+
+-- Called by the agent over the console: "name count" lines, then reset.
+function dsSeen()
+  local out = {}
+  for n, c in pairs(seen) do out[#out + 1] = string.format("%s %d", n, c) end
+  seen, seenN = {}, 0
+  return table.concat(out, "\n")
+end
+
+local function u16(n) return string.char(math.floor(n / 256) % 256, n % 256) end
+local function u32(n) return u16(math.floor(n / 65536)) .. u16(n % 65536) end
+-- smartdns' SOA (_dns_server_setup_soa): a.gtld-servers.net. nstld.verisign-grs.com. 1800 1800 900 604800 86400
+local SOA_RDATA = "\1a\12gtld-servers\3net\0" .. "\5nstld\12verisign-grs\3com\0" ..
+  u32(1800) .. u32(1800) .. u32(900) .. u32(604800) .. u32(86400)
+
+addAction(OrRule({QTypeRule(DNSQType.A), QTypeRule(DNSQType.AAAA)}), LuaAction(function(dq)
+  local name = dq.qname:toStringNoDot():lower()
+  local ttl = drop[dq.qtype][name]
+  if not ttl then return DNSAction.None, "" end
+  local q = dq:getContent()
+  local pos = 13 -- end of the question (the query's qname is never compressed)
+  while pos <= #q and q:byte(pos) ~= 0 do pos = pos + q:byte(pos) + 1 end
+  if pos + 4 > #q then return DNSAction.None, "" end
+  note(name) -- still asked for: the agent keeps re-measuring it
+  incMetric("dualstack-suppressed")
+  -- QR + the query's RD, RA; 1 question, 1 authority record: SOA owned by the qname (pointer to offset 12)
+  dq:setContent(q:sub(1, 2) .. string.char(128 + q:byte(3) % 2, 128) .. u16(1) .. u16(0) .. u16(1) .. u16(0) ..
+    q:sub(13, pos + 4) .. "\192\12" .. u16(6) .. u16(1) .. u32(ttl) .. u16(#SOA_RDATA) .. SOA_RDATA)
+  return DNSAction.HeaderModify, ""
+end), {name = "dnsjos-dualstack-select"})
+
+addResponseAction(AndRule({RCodeRule(DNSRCode.NOERROR), QTypeRule(DNSQType.AAAA)}),
+  LuaResponseAction(function(dr)
+    local p = dr:getContent()
+    if #p >= 12 and p:byte(7) * 256 + p:byte(8) > 0 then note(dr.qname:toStringNoDot():lower()) end
+    return DNSResponseAction.None, ""
+  end), {name = "dnsjos-dualstack-seen"})
+`)
+	return []byte(s.String())
+}

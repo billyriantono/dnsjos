@@ -34,6 +34,8 @@ const (
 	CDBPath           = DataDir + "/blocklist/current.cdb"
 	// CGKLearnState is the agent's memory of names checked through CGK aliases (SPEC §6.6).
 	CGKLearnState = DataDir + "/cgk-learned.json"
+	// DualStackState is the agent's memory of IPv4/IPv6 connect times per name.
+	DualStackState = DataDir + "/dualstack.json"
 )
 
 type Options struct {

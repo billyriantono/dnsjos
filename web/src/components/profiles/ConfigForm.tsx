@@ -54,7 +54,7 @@ export function ConfigForm({
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
   const { do53, doh, dot, tls } = s.listen
-  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an } = s
+  const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds } = s
 
   return (
     <Tabs value={tab} onValueChange={(t) => onTabChange(t as TabId)} className="gap-4">
@@ -289,6 +289,51 @@ export function ConfigForm({
             <NumField label="Min OK test sites" path="cgk.min_ok" value={g.min_ok} onChange={(min_ok) => part('cgk', { min_ok })} min={1} max={Math.max(1, g.test_sites.length)} help={`An alias must serve at least this many of the ${g.test_sites.length} test sites.`} />
             <NumField label="Refresh interval" path="cgk.refresh_interval_h" value={g.refresh_interval_h} onChange={(refresh_interval_h) => part('cgk', { refresh_interval_h })} min={1} max={168} unit="hours" />
           </Grid>
+        </Section>
+      </TabsContent>
+
+      <TabsContent value="dualstack" className="grid gap-4">
+        <Section
+          title="Dual-stack IP selection"
+          description="smartdns dualstack-ip-selection. Every 10 minutes the agent speed-checks the names clients get AAAA answers for over IPv4 and IPv6. When IPv4 is faster by at least the threshold, or IPv6 does not answer, AAAA queries for the name get NODATA (with an SOA, like smartdns) so clients use IPv4. Only enable it on nodes whose IPv6 path is the same as their clients' (the node measures on their behalf)."
+          enabled={ds.enabled}
+          onEnabledChange={(enabled) => part('dualstack', { enabled })}
+        >
+          <Grid>
+            <NumField
+              label="Threshold"
+              path="dualstack.threshold_ms"
+              value={ds.threshold_ms}
+              onChange={(threshold_ms) => part('dualstack', { threshold_ms })}
+              min={0}
+              max={1000}
+              unit="ms"
+              help="dualstack-ip-selection-threshold: the faster family must win by at least this much. 0 = 10 ms."
+            />
+            <TextField
+              label="Speed check mode"
+              path="dualstack.speed_check_mode"
+              value={ds.speed_check_mode}
+              onChange={(speed_check_mode) => part('dualstack', { speed_check_mode })}
+              placeholder="ping,tcp:80,tcp:443"
+              help="speed-check-mode: ping (ICMP) or tcp:<port>. The next method starts 100 ms later if no address answered yet; the fastest answer wins. none = no speed test (nothing dropped)."
+            />
+            <SwitchField
+              label="Allow force AAAA"
+              help="dualstack-ip-allow-force-AAAA: also answer A queries NODATA when IPv6 is faster."
+              checked={ds.allow_force_aaaa}
+              onChange={(allow_force_aaaa) => part('dualstack', { allow_force_aaaa })}
+            />
+          </Grid>
+          <ListEditor
+            label="Exclude"
+            path="dualstack.exclude"
+            value={ds.exclude}
+            onChange={(exclude) => part('dualstack', { exclude })}
+            validate={isHostname}
+            what="domain"
+            help="Names (and their subdomains) whose answers are never dropped (domain-rules -dualstack-ip-selection no)."
+          />
         </Section>
       </TabsContent>
 

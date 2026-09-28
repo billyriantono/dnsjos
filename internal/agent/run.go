@@ -23,6 +23,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/agent/collect"
 	"github.com/billyriantono/dnsjos/internal/agent/dnsdist"
 	"github.com/billyriantono/dnsjos/internal/agent/dnstap"
+	"github.com/billyriantono/dnsjos/internal/agent/dualstack"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
@@ -92,7 +93,7 @@ func Run(ctx context.Context, o Options) error {
 	o.Log.Info("agent starting", "version", o.Version, "panel", a.cl.BaseURL, "root", o.Root, "no_systemd", o.NoSystemd)
 
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.cgkLearnLoop, a.inventoryLoop, a.allowlistLoop} {
+	for _, f := range []func(context.Context){a.configLoop, a.blocklistLoop, a.heartbeatLoop, a.dnstapLoop, a.analyticsLoop, a.cgkLoop, a.cgkLearnLoop, a.dualStackLoop, a.inventoryLoop, a.allowlistLoop} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}
@@ -719,5 +720,122 @@ func (a *agent) cgkLearn(ctx context.Context, st cgk.LearnState) {
 	rep := api.CGKLearnedReport{Excluded: excluded, Checked: st.Checked(), At: now}
 	if err := a.cl.PostCGKLearned(ctx, rep); err != nil && ctx.Err() == nil {
 		a.o.Log.Warn("posting cgk learned exclusions failed", "err", err)
+	}
+}
+
+// ── Dual-stack selection ────────────────────────────────────────────────────
+
+const dualStackEvery = 10 * time.Minute
+
+// dualStackLoop drains the names dualstack.lua saw AAAA answers for, measures the busiest
+// over IPv4 and IPv6 and keeps dnsjos/dualstack-prefer-ipv4.txt (read by dsReload()) current.
+func (a *agent) dualStackLoop(ctx context.Context) {
+	st := dualstack.State{}
+	if b, err := os.ReadFile(a.o.path(DualStackState)); err == nil {
+		if err := json.Unmarshal(b, &st); err != nil || st == nil {
+			st = dualstack.State{}
+		}
+	}
+	t := time.NewTicker(dualStackEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		a.dualStack(ctx, st)
+	}
+}
+
+func (a *agent) dualStack(ctx context.Context, st dualstack.State) {
+	a.mu.Lock()
+	var spec api.ConfigSpec
+	on := a.cfg != nil && a.cfg.Spec.DualStack.Enabled && a.applied != 0
+	if on {
+		spec = a.cfg.Spec
+	}
+	a.mu.Unlock()
+	if !on {
+		return
+	}
+	out, err := dnsdist.Console(ctx, a.app.Conf(), "dsSeen()")
+	if err != nil {
+		if ctx.Err() == nil && !(errors.Is(err, dnsdist.ErrNoBinary) && a.o.NoSystemd) {
+			a.o.Log.Debug("dualstack: dsSeen() failed", "err", err)
+		}
+		return
+	}
+	now := time.Now().UTC()
+	pr := dualstack.ParamsOf(spec.DualStack)
+	v4, v6 := []dualstack.Item{}, []dualstack.Item{}
+	ready := dualstack.IPv6Ready()
+	if ready { // no IPv6 route here: every name would look IPv4-only (smartdns turns the feature off too)
+		// Resolve through the node's own first upstream: the answers its clients get.
+		p := dualstack.NetProber{Resolver: spec.Upstreams.Servers[0].Address}
+		dualstack.Update(ctx, p, st, dualstack.ParseSeen(out), pr, now)
+		if ctx.Err() != nil {
+			return
+		}
+		v4, v6 = st.Lists(pr)
+	}
+	if b, err := json.Marshal(st); err == nil {
+		if err := apply.WriteFile(a.o.path(DualStackState), b, 0o600); err != nil {
+			a.o.Log.Warn("dualstack: saving state failed", "err", err)
+		}
+	}
+	defer a.postDualStack(ctx, st, pr, ready, v4, v6, now)
+
+	dir := a.o.path(DnsdistDir)
+	files := []struct {
+		rel, why string
+		items    []dualstack.Item
+	}{
+		{dnsconf.FileDualStackPreferV4, "names faster over IPv4 from this node: AAAA answered NODATA (name ttl)", v4},
+		{dnsconf.FileDualStackPreferV6, "names faster over IPv6 from this node: A answered NODATA (name ttl)", v6},
+	}
+	changed := false
+	for _, f := range files {
+		path, lines := filepath.Join(dir, f.rel), dualstack.Lines(f.items)
+		if _, err := os.Stat(path); err == nil && slices.Equal(cgk.ReadList(path), lines) {
+			continue
+		}
+		if err := apply.WriteFile(path, cgk.Format(f.why, now, lines), 0o644); err != nil {
+			a.o.Log.Warn("dualstack: writing the list failed", "err", err)
+			return
+		}
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if out, err = dnsdist.Console(ctx, a.app.Conf(), "dsReload()"); err != nil {
+		a.o.Log.Warn("dualstack: dsReload() failed", "err", err)
+	} else {
+		a.o.Log.Info("dualstack lists updated", "prefer_ipv4", len(v4), "prefer_ipv6", len(v6), "dnsdist", out)
+	}
+}
+
+// postDualStack reports the listed names to the panel (node page, SPEC §6.8).
+func (a *agent) postDualStack(ctx context.Context, st dualstack.State, pr dualstack.Params, ready bool, v4, v6 []dualstack.Item, now time.Time) {
+	ms := func(d time.Duration) float64 {
+		if d < 0 {
+			return -1
+		}
+		return float64(d.Microseconds()) / 1000
+	}
+	rep := api.DualStackReport{Names: []api.DualStackName{}, Checked: st.Checked(), IPv6: ready, At: now}
+	for _, l := range []struct {
+		prefer string
+		items  []dualstack.Item
+	}{{"ipv4", v4}, {"ipv6", v6}} {
+		for _, it := range l.items {
+			e := st[it.Name]
+			rep.Names = append(rep.Names, api.DualStackName{Name: it.Name, Prefer: l.prefer, V4Ms: ms(e.V4), V6Ms: ms(e.V6),
+				TTL: it.TTL, Hits: e.Hits, CheckedAt: e.CheckedAt})
+		}
+	}
+	if err := a.cl.PostDualStack(ctx, rep); err != nil && ctx.Err() == nil {
+		a.o.Log.Warn("posting dualstack report failed", "err", err)
 	}
 }

@@ -19,6 +19,7 @@ import type {
   BlocklistSourceCreate,
   BlocklistSourcePatch,
   CGKLearnedReport,
+  DualStackReport,
   CGKReport,
   Command,
   CommandRequest,
@@ -149,6 +150,7 @@ export const api = {
     rendered: (id: string) => get<RenderedConfig>(`${V1}/nodes/${id}/config/rendered`),
     cgk: (id: string) => get<CGKReport | null>(`${V1}/nodes/${id}/cgk`),
     cgkLearned: (id: string) => get<CGKLearnedReport>(`${V1}/nodes/${id}/cgk/learned`),
+    dualstack: (id: string) => get<DualStackReport>(`${V1}/nodes/${id}/dualstack`),
   },
   enrollment: {
     list: () => get<List<EnrollmentToken>>(`${V1}/enrollment-tokens`),
@@ -232,6 +234,7 @@ export const qk = {
   nodeRendered: (id: string) => ['nodes', id, 'rendered'] as const,
   nodeCGK: (id: string) => ['nodes', id, 'cgk'] as const,
   nodeCGKLearned: (id: string) => ['nodes', id, 'cgk', 'learned'] as const,
+  nodeDualStack: (id: string) => ['nodes', id, 'dualstack'] as const,
   nodeVersions: (id: string) => ['nodes', id, 'versions'] as const,
   upgrades: ['upgrades'] as const,
   upgrade: (id: number) => ['upgrades', id] as const,
@@ -289,6 +292,8 @@ export const useNodeCGK = (id: string) =>
   useQuery({ queryKey: qk.nodeCGK(id), queryFn: () => api.nodes.cgk(id), refetchInterval: 60_000 })
 export const useNodeCGKLearned = (id: string) =>
   useQuery({ queryKey: qk.nodeCGKLearned(id), queryFn: () => api.nodes.cgkLearned(id), refetchInterval: 60_000 })
+export const useNodeDualStack = (id: string) =>
+  useQuery({ queryKey: qk.nodeDualStack(id), queryFn: () => api.nodes.dualstack(id), refetchInterval: 60_000 })
 export const useNodeVersions = (id: string) =>
   useQuery({ queryKey: qk.nodeVersions(id), queryFn: () => api.nodes.versions(id), refetchInterval: LIVE })
 export const useUpgrades = () => useQuery({ queryKey: qk.upgrades, queryFn: api.upgrades.list, refetchInterval: LIVE })

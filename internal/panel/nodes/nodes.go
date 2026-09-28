@@ -50,6 +50,7 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Viewer("GET /api/v1/nodes/{id}/live", s.live)
 	r.Viewer("GET /api/v1/nodes/{id}/cgk", s.cgkLatest)
 	r.Viewer("GET /api/v1/nodes/{id}/cgk/learned", s.cgkLearnedGet)
+	r.Viewer("GET /api/v1/nodes/{id}/dualstack", s.dualStackGet)
 	r.Admin("POST /api/v1/nodes/{id}/commands", s.command)
 	r.Viewer("GET /api/v1/nodes/{id}/versions", s.versions)
 
@@ -59,6 +60,7 @@ func Register(r *app.Router, d *app.Deps) {
 	r.Agent("POST /agent/v1/blocked", s.blocked)
 	r.Agent("POST /agent/v1/cgk", s.cgk)
 	r.Agent("POST /agent/v1/cgk/learned", s.cgkLearnedPost)
+	r.Agent("POST /agent/v1/dualstack", s.dualStackPost)
 
 	r.Public("GET /install.sh", s.installScript)
 	r.Public("GET /dl/agent/linux/{arch}", s.download)
@@ -544,6 +546,51 @@ func (s *svc) cgkLearnedPost(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := s.d.Pool.Exec(r.Context(), `UPDATE nodes SET cgk_learned = $2, cgk_learned_checked = $3, cgk_learned_at = $4
 		WHERE id = $1`, app.NodeIDFrom(r.Context()), rep.Excluded, rep.Checked, rep.At); err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// dualStackGet is the node's latest dual-stack selection (SPEC §6.8); an empty list with
+// a null "at" before the first report.
+func (s *svc) dualStackGet(w http.ResponseWriter, r *http.Request) {
+	rep := api.DualStackReport{Names: []api.DualStackName{}}
+	var at *time.Time
+	err := s.d.Pool.QueryRow(r.Context(), `SELECT dualstack, dualstack_checked, dualstack_ipv6, dualstack_at FROM nodes
+		WHERE id = $1 AND deleted_at IS NULL`, r.PathValue("id")).Scan(&rep.Names, &rep.Checked, &rep.IPv6, &at)
+	if err != nil {
+		httpx.WriteDBError(w, r, err)
+		return
+	}
+	if at != nil {
+		rep.At = *at
+	}
+	httpx.WriteJSON(w, http.StatusOK, rep)
+}
+
+func (s *svc) dualStackPost(w http.ResponseWriter, r *http.Request) {
+	var rep api.DualStackReport
+	if err := httpx.ReadJSON(r, &rep, httpx.MaxJSON); err != nil {
+		httpx.BadRequest(w, err.Error())
+		return
+	}
+	if len(rep.Names) > 4096 {
+		httpx.BadRequest(w, "too many dual-stack names")
+		return
+	}
+	if rep.Names == nil {
+		rep.Names = []api.DualStackName{}
+	}
+	for i := range rep.Names {
+		rep.Names[i].Name = clip(rep.Names[i].Name, 255)
+		rep.Names[i].Prefer = clip(rep.Names[i].Prefer, 8)
+	}
+	if rep.At.IsZero() {
+		rep.At = time.Now()
+	}
+	if _, err := s.d.Pool.Exec(r.Context(), `UPDATE nodes SET dualstack = $2, dualstack_checked = $3, dualstack_ipv6 = $4,
+		dualstack_at = $5 WHERE id = $1`, app.NodeIDFrom(r.Context()), rep.Names, rep.Checked, rep.IPv6, rep.At); err != nil {
 		httpx.WriteDBError(w, r, err)
 		return
 	}

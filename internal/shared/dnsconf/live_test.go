@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,9 +60,10 @@ func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
 		q := r.Question[0]
 		n, _ := d.hits.LoadOrStore(q.Name, new(atomic.Int32))
 		n.(*atomic.Int32).Add(1)
-		if q.Qtype == dns.TypeA {
-			for _, ip := range ips[q.Name] {
-				rr, _ := dns.NewRR(fmt.Sprintf("%s 3600 IN A %s", q.Name, ip))
+		for _, ip := range ips[q.Name] {
+			a := netip.MustParseAddr(ip)
+			if q.Qtype == dns.TypeA && a.Is4() || q.Qtype == dns.TypeAAAA && a.Is6() {
+				rr, _ := dns.NewRR(fmt.Sprintf("%s 3600 IN %s %s", q.Name, dns.TypeToString[q.Qtype], ip))
 				m.Answer = append(m.Answer, rr)
 			}
 		}
@@ -90,7 +92,8 @@ func startDnsdist(t *testing.T, ips map[string][]string) *liveDnsdist {
 	spec.Webserver.Listen = d.web
 	spec.Upstreams.Servers = []api.Upstream{{Address: pc.LocalAddr().String(), Weight: 1, Order: 1, Sockets: 1}}
 	spec.Abuse.Enabled, spec.CGK.Enabled, spec.Blocking.LogBlocked = false, false, false
-	spec.Blocking.BlockResponseIPs = true                                // opt-in since it became off by default
+	spec.Blocking.BlockResponseIPs = true // opt-in since it became off by default
+	spec.DualStack.Enabled = true
 	spec.Analytics.StreamAddr = fmt.Sprintf("127.0.0.1:%d", freePort(t)) // nobody listens; fine
 	rt := testRT
 	rt.BaseDir, rt.CDBPath = d.dir, cdbPath
@@ -258,4 +261,65 @@ func TestLiveAllowlist(t *testing.T) {
 		t.Fatalf("missing files: %s", out)
 	}
 	check(map[string]string{"mixed.example.": bp + "," + bp})
+}
+
+// TestLiveDualStack: dsSeen() reports names with AAAA answers; after dsReload() listed
+// names get smartdns' reply for the dropped family (NODATA, SOA for the name in the
+// authority section with the listed TTL), from cache too, while the other family is untouched.
+func TestLiveDualStack(t *testing.T) {
+	d := startDnsdist(t, map[string][]string{
+		"dns.google.": {"8.8.8.8", "2001:4860:4860::8888"}, "v6.example.": {"198.51.100.8", "2001:db8::8"},
+		"v4only.example.": {"198.51.100.7"},
+	})
+	count := func(name string, qt uint16) int { return len(d.query(name, qt).Answer) }
+	if count("dns.google.", dns.TypeAAAA) != 1 || count("v6.example.", dns.TypeA) != 1 {
+		t.Fatal("answers dropped before the lists exist")
+	}
+	count("v4only.example.", dns.TypeAAAA) // NODATA: not reported
+	if out := strings.TrimSpace(d.console("dsSeen()")); out != "dns.google 1" {
+		t.Fatalf("dsSeen() = %q", out)
+	}
+
+	write := func(v4, v6 string) string {
+		os.WriteFile(filepath.Join(d.dir, FileDualStackPreferV4), []byte(v4), 0o644)
+		os.WriteFile(filepath.Join(d.dir, FileDualStackPreferV6), []byte(v6), 0o644)
+		return d.console("dsReload()")
+	}
+	if out := write("# test\nDNS.google 42\nbroken-line\n", "v6.example 77\n"); !strings.Contains(out, "dualstack: 1 names prefer IPv4, 1 prefer IPv6") {
+		t.Fatalf("dsReload() = %s", out)
+	}
+	nodata := func(name string, qt uint16, ttl uint32) {
+		t.Helper()
+		r := d.query(name, qt)
+		soa, ok := func() (*dns.SOA, bool) {
+			if len(r.Ns) != 1 {
+				return nil, false
+			}
+			s, ok := r.Ns[0].(*dns.SOA)
+			return s, ok
+		}()
+		if r.Rcode != dns.RcodeSuccess || len(r.Answer) != 0 || !ok || soa.Hdr.Name != name || soa.Hdr.Ttl != ttl ||
+			soa.Ns != "a.gtld-servers.net." || soa.Mbox != "nstld.verisign-grs.com." || soa.Serial != 1800 ||
+			soa.Refresh != 1800 || soa.Retry != 900 || soa.Expire != 604800 || soa.Minttl != 86400 || r.Id == 0 || !r.Response {
+			t.Errorf("%s %s: want NODATA + smartdns SOA ttl %d, got %v", name, dns.TypeToString[qt], ttl, r)
+		}
+	}
+	nodata("dns.google.", dns.TypeAAAA, 42) // cached upstream answer, still dropped
+	nodata("v6.example.", dns.TypeA, 77)
+	if a := d.query("dns.google.", dns.TypeA).Answer; len(a) != 1 || a[0].(*dns.A).A.String() != "8.8.8.8" {
+		t.Errorf("A changed: %v", a)
+	}
+	if count("v6.example.", dns.TypeAAAA) != 1 {
+		t.Error("AAAA of an IPv6-preferred name dropped")
+	}
+	seen := strings.Split(strings.TrimSpace(d.console("dsSeen()")), "\n")
+	slices.Sort(seen) // v6.example: its dropped A and its real AAAA
+	if !slices.Equal(seen, []string{"dns.google 1", "v6.example 2"}) {
+		t.Errorf("dropped / answered names not counted: %v", seen)
+	}
+
+	write("", "")
+	if count("dns.google.", dns.TypeAAAA) != 1 || count("v6.example.", dns.TypeA) != 1 {
+		t.Error("answers still dropped after the names left the lists")
+	}
 }

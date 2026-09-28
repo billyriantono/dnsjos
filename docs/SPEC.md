@@ -215,6 +215,12 @@ panel on save and in the agent before rendering.
     "exclude": ["argotunnel.com", "gitlab.com", "…"],
     "aliases_wanted": 8, "min_ok": 3, "refresh_interval_h": 6
   },
+  "dualstack": {                    // §6.8, opt-in: smartdns dualstack-ip-selection
+    "enabled": false, "threshold_ms": 10,            // 0 = 10 ms, 0..1000
+    "allow_force_aaaa": false,                       // also drop A when IPv6 is faster
+    "speed_check_mode": "ping,tcp:80,tcp:443",       // "" = this default
+    "exclude": []                                    // names + subdomains never touched
+  },
   "tuning": {"udp_buffer_bytes": 16777216, "tcp_workers": 0, "extra_lua": ""},
   "webserver": {"listen": "127.0.0.1:8083", "prometheus_acl": ["127.0.0.1/32"]},
   "analytics": {"enabled": true, "sample_rate": 1, "top_k": 5000, "stream_addr": "127.0.0.1:6001"}  // §19
@@ -435,6 +441,48 @@ rewritten like A answers:
 * `cgk.lua` rewrites AAAA records (16-byte rdata) inside the rewrite ranges to
   `alias6Bytes`, stable per name like IPv4; `cgkSeen()` reports IPv6 pairs too, so exclusion
   learning (§6.6) covers IPv6 on nodes that have it.
+
+### 6.8 Dual-stack IP selection
+
+smartdns' `dualstack-ip-selection` for dnsdist. When a name is faster over IPv4 than over
+IPv6 from the node (e.g. `dns.google`: 8.8.8.8 local, 2001:4860:4860::8888 routed abroad),
+dual-stack clients still pick IPv6. With `dualstack.enabled` the node behaves like smartdns:
+
+| smartdns | DnsJos |
+|---|---|
+| `dualstack-ip-selection-threshold` (ms) | `threshold_ms` (0 = 10, smartdns' default) |
+| `dualstack-ip-allow-force-AAAA` | `allow_force_aaaa` |
+| `speed-check-mode ping,tcp:80,tcp:443` | `speed_check_mode`, same syntax and default |
+| `domain-rules /x/ -dualstack-ip-selection no` | `exclude` (name + subdomains) |
+| IPv6 readiness probe; no IPv6 route = feature off | same: no IPv6 route = empty lists |
+
+* Decision (`_dns_server_force_dualstack`): both families have addresses, the kept family
+  answered its speed check, and the other one did not or was slower by ≥ threshold. AAAA is
+  dropped when IPv4 wins; A only with `allow_force_aaaa` when IPv6 wins.
+* Speed check (`_dns_server_second_ping_check`): every address (max 16 per family) with the
+  first method; each later method starts 100 ms after the previous one (smartdns'
+  `DNS_PING_CHECK_INTERVAL`; its docs say 200 ms) unless an address already answered. Every
+  answer within 950 ms of the start (`DNS_PING_TIMEOUT`, ≥ 200 ms per probe) counts, the
+  fastest wins. `ping` is an ICMP echo (unprivileged socket, else raw); `none` = no speed
+  test, so nothing is dropped (smartdns: no ping result, no dual-stack decision).
+* Reply: what smartdns sends for a forced SOA — NOERROR, no answer, and in the authority
+  section `<qname> <ttl> SOA a.gtld-servers.net. nstld.verisign-grs.com. 1800 1800 900
+  604800 86400`, TTL = the dropped RRset's TTL. It is built before the cache, so a cached
+  answer is dropped too; the other family is untouched.
+* Difference (inherent to dnsdist): smartdns probes while the query waits. dnsdist cannot
+  block, so the agent measures in the background: `dualstack.lua` counts names with a
+  non-empty AAAA answer and dropped queries (`dsSeen()`, "name count" lines, max 2000 per
+  drain); every 10 min the agent resolves the 100 busiest due names through the first
+  upstream and speed-checks them. The first queries of a new name are never dropped.
+  Listed names are re-measured after 1 h, others after 6 h; names unseen for 7 days are
+  forgotten. State: `/var/lib/dnsjos/dualstack.json`.
+* Lists: `dnsjos/dualstack-prefer-ipv4.txt` (AAAA dropped) and
+  `dnsjos/dualstack-prefer-ipv6.txt` (A dropped), "name ttl" per line, rewritten and
+  `dsReload()`ed only on change. Metrics: `dualstack-suppressed`, `dualstack-names`.
+* Report: `POST /agent/v1/dualstack` (`api.DualStackReport`, every run) → `nodes.dualstack*`
+  (migration `0011`) → `GET /api/v1/nodes/{id}/dualstack` → node page, Dual-stack tab.
+* The node measures on its clients' behalf, so this is only right on nodes that share their
+  clients' IPv6 path. Off by default; enable it per profile or per node (§6.3).
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 

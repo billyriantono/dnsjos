@@ -30,6 +30,10 @@ func TestGolden(t *testing.T) {
 		},
 		"abuse_off": func(s *api.ConfigSpec) { s.Abuse.Enabled = false },
 		"cgk_off":   func(s *api.ConfigSpec) { s.CGK.Enabled = false },
+		"dualstack": func(s *api.ConfigSpec) {
+			s.Blocking.Enabled, s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false, false
+			s.DualStack.Enabled = true
+		},
 		"response_ips": func(s *api.ConfigSpec) { // opt-in (off by default)
 			s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false
 			s.Blocking.BlockResponseIPs = true

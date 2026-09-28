@@ -90,6 +90,33 @@ export interface CGK {
   refresh_interval_h: number
 }
 
+/** SPEC §6.8: smartdns dualstack-ip-selection. NODATA for the slower family of a name, measured from the node. */
+export interface DualStack {
+  enabled: boolean
+  threshold_ms: number // 0..1000, 0 = 10 (dualstack-ip-selection-threshold)
+  allow_force_aaaa: boolean // also drop A when IPv6 is faster (dualstack-ip-allow-force-AAAA)
+  speed_check_mode: string // "ping,tcp:80,tcp:443" (speed-check-mode)
+  exclude: string[] // names + subdomains never touched
+}
+
+/** SPEC §6.8: a name whose A or AAAA answers the node drops. */
+export interface DualStackName {
+  name: string
+  prefer: 'ipv4' | 'ipv6'
+  v4_ms: number // -1 = no answer
+  v6_ms: number
+  ttl: number
+  hits: number
+  checked_at: string
+}
+
+export interface DualStackReport {
+  names: DualStackName[]
+  checked: number
+  ipv6: boolean
+  at: string // 0001-01-01… before the first report
+}
+
 export interface Tuning {
   udp_buffer_bytes: number
   tcp_workers: number
@@ -116,6 +143,7 @@ export interface ConfigSpec {
   blocking: Blocking
   abuse: Abuse
   cgk: CGK
+  dualstack: DualStack
   tuning: Tuning
   webserver: Webserver
   analytics: Analytics

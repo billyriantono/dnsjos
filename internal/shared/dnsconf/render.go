@@ -42,6 +42,10 @@ const (
 	FileCGKAliases6 = "dnsjos/cgk-aliases6.txt" // IPv6 aliases (SPEC §6.7)
 	// Names the agent found broken through a CGK alias (SPEC §6.6), never rendered.
 	FileCGKLearned = "dnsjos/cgk-learned-exclude.txt"
+	FileDualStack  = "dnsjos/dualstack.lua"
+	// Names the agent measured faster over IPv4 / IPv6 (never rendered).
+	FileDualStackPreferV4 = "dnsjos/dualstack-prefer-ipv4.txt"
+	FileDualStackPreferV6 = "dnsjos/dualstack-prefer-ipv6.txt"
 	// Owned by the agent's allowlist sync, never rendered.
 	FileAllowDomains = "dnsjos/allowlist-domains.txt"
 	FileAllowIPs     = "dnsjos/allowlist-ips.txt"
@@ -177,7 +181,7 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		files[rel] = body
 		w("dofile(%s)\n", luaString(path.Join(rt.BaseDir, rel)))
 	}
-	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled {
+	if spec.Blocking.Enabled || spec.Abuse.Enabled || spec.CGK.Enabled || spec.DualStack.Enabled {
 		c.WriteString("\n")
 	}
 	if spec.Blocking.Enabled {
@@ -200,6 +204,9 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 			return nil, err
 		}
 		module(FileCGK, b)
+	}
+	if spec.DualStack.Enabled {
+		module(FileDualStack, renderDualStack(rt))
 	}
 	if an := spec.Analytics; an.Enabled {
 		ap, err := addrPort(an.StreamAddr)

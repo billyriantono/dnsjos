@@ -2,6 +2,12 @@
 // (SPEC §6, §8, §10). It is the single source of truth for wire formats.
 package api
 
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
+
 // ConfigSpec is the desired state of a dnsdist node (SPEC §6).
 type ConfigSpec struct {
 	Listen    Listen    `json:"listen"`
@@ -11,6 +17,7 @@ type ConfigSpec struct {
 	Blocking  Blocking  `json:"blocking"`
 	Abuse     Abuse     `json:"abuse"`
 	CGK       CGK       `json:"cgk"`
+	DualStack DualStack `json:"dualstack"`
 	Tuning    Tuning    `json:"tuning"`
 	Webserver Webserver `json:"webserver"`
 	Analytics Analytics `json:"analytics"`
@@ -105,6 +112,55 @@ type CGK struct {
 	RefreshIntervalH int      `json:"refresh_interval_h"`
 }
 
+// DualStack answers AAAA queries empty (NODATA + SOA) for names whose IPv4 address is
+// measurably faster from this node than their IPv6 one, so dual-stack clients connect over
+// IPv4: smartdns' dualstack-ip-selection (SPEC §6.8). Only right on nodes that share their
+// clients' IPv6 path.
+type DualStack struct {
+	Enabled bool `json:"enabled"`
+	// IPv4 must be at least this much faster (0 = 10 ms) before AAAA answers are dropped
+	// (dualstack-ip-selection-threshold).
+	ThresholdMs int `json:"threshold_ms"`
+	// Also drop A answers when IPv6 is faster (dualstack-ip-allow-force-AAAA).
+	AllowForceAAAA bool `json:"allow_force_aaaa"`
+	// Probe methods tried in order until one answers (speed-check-mode; "" = default).
+	SpeedCheckMode string `json:"speed_check_mode"`
+	// Names (and their subdomains) never touched (domain-rules -dualstack-ip-selection no).
+	Exclude []string `json:"exclude"`
+}
+
+// DefaultSpeedCheckMode is smartdns' default speed-check-mode.
+const DefaultSpeedCheckMode = "ping,tcp:80,tcp:443"
+
+// SpeedCheck is one probe method: ICMP echo (Port 0) or a TCP connect to Port.
+type SpeedCheck struct{ Port int }
+
+// ParseSpeedCheckMode parses "ping,tcp:80,tcp:443" ("" = DefaultSpeedCheckMode). "none"
+// (no speed check) returns no methods: nothing is ever measured faster, nothing dropped.
+func ParseSpeedCheckMode(s string) ([]SpeedCheck, error) {
+	switch strings.TrimSpace(s) {
+	case "":
+		s = DefaultSpeedCheckMode
+	case "none":
+		return []SpeedCheck{}, nil
+	}
+	var out []SpeedCheck
+	for _, f := range strings.Split(s, ",") {
+		f = strings.TrimSpace(f)
+		if f == "ping" {
+			out = append(out, SpeedCheck{})
+			continue
+		}
+		p, ok := strings.CutPrefix(f, "tcp:")
+		n, err := strconv.Atoi(p)
+		if !ok || err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("%q is not ping or tcp:<port>", f)
+		}
+		out = append(out, SpeedCheck{Port: n})
+	}
+	return out, nil
+}
+
 type Tuning struct {
 	UDPBufferBytes int    `json:"udp_buffer_bytes"`
 	TCPWorkers     int    `json:"tcp_workers"`
@@ -193,6 +249,7 @@ func DefaultConfigSpec() ConfigSpec {
 			},
 			AliasesWanted: 8, MinOK: 3, RefreshIntervalH: 6,
 		},
+		DualStack: DualStack{ThresholdMs: 10, SpeedCheckMode: DefaultSpeedCheckMode, Exclude: []string{}}, // opt-in: see DualStack
 		Tuning:    Tuning{UDPBufferBytes: 16777216},
 		Webserver: Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},
 		Analytics: DefaultAnalytics(),

@@ -66,6 +66,7 @@ export const defaultSpec = (): ConfigSpec => ({
     min_ok: 3,
     refresh_interval_h: 6,
   },
+  dualstack: { enabled: false, threshold_ms: 10, allow_force_aaaa: false, speed_check_mode: 'ping,tcp:80,tcp:443', exclude: [] },
   tuning: { udp_buffer_bytes: 16777216, tcp_workers: 0, extra_lua: '' },
   webserver: { listen: '127.0.0.1:8083', prometheus_acl: ['127.0.0.1/32'] },
   analytics: { enabled: true, sample_rate: 1, top_k: 5000, stream_addr: '127.0.0.1:6001' },
@@ -90,7 +91,7 @@ export function normalizeSpec(spec: ConfigSpec): ConfigSpec {
 export type SpecErrors = Record<string, string[]>
 
 const FIELD_RE =
-  /\b((?:listen|acl|upstreams|cache|blocking|abuse|cgk|tuning|webserver|analytics)(?:\[\d+\])?(?:\.[a-z0-9_]+(?:\[\d+\])?)*): (.+)$/
+  /\b((?:listen|acl|upstreams|cache|blocking|abuse|cgk|dualstack|tuning|webserver|analytics)(?:\[\d+\])?(?:\.[a-z0-9_]+(?:\[\d+\])?)*): (.+)$/
 
 /** Parses spec.Validate() output ("field: message" lines joined by "\n", maybe prefixed) into per-field errors. */
 export function parseSpecErrors(message: string): SpecErrors {
