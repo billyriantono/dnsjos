@@ -23,9 +23,11 @@ import (
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
 
-// Managed are the files the agent owns under the dnsdist dir (the CGK txt files
-// belong to the prober and are never touched here).
-var Managed = []string{dnsconf.FileConf, dnsconf.FileBlocking, dnsconf.FileAbuse, dnsconf.FileCGK}
+// Managed are the files the agent owns under the dnsdist dir: every file dnsconf.Render
+// can produce (TestManagedCoversRender). The CGK, dual-stack and fastest-IP txt files
+// belong to their loops and are never touched here.
+var Managed = []string{dnsconf.FileConf, dnsconf.FileBlocking, dnsconf.FileAbuse, dnsconf.FileCGK,
+	dnsconf.FileDualStack, dnsconf.FileFastestIP}
 
 const (
 	StagingName = ".dnsjos-staging"

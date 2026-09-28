@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -320,6 +321,23 @@ func TestPickOwner(t *testing.T) {
 	}{{110, 0, 110, 0o640}, {110, 50, 110, 0o640}, {-1, 50, 50, 0o640}, {-1, 0, -1, 0o644}, {-1, -1, -1, 0o644}} {
 		if gid, mode := pickOwner(c.dnsdist, c.conf); gid != c.gid || mode != c.mode {
 			t.Errorf("pickOwner(%d, %d) = %d %v", c.dnsdist, c.conf, gid, mode)
+		}
+	}
+}
+
+// TestManagedCoversRender: a module missing from Managed passes the staged check but is never
+// installed, so dnsdist fails to start on its dofile() (seen with dualstack.lua).
+func TestManagedCoversRender(t *testing.T) {
+	spec := api.DefaultConfigSpec()
+	spec.Blocking.Enabled, spec.Abuse.Enabled, spec.CGK.Enabled = true, true, true
+	spec.DualStack.Enabled, spec.SpeedCheck.FastestIP = true, true
+	files, err := dnsconf.Render(spec, rt(t.TempDir()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for rel := range files {
+		if !slices.Contains(Managed, rel) {
+			t.Errorf("%s is rendered but not in Managed: it would never be installed", rel)
 		}
 	}
 }
