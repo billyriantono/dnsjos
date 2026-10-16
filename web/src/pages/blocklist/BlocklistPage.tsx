@@ -12,6 +12,8 @@ import { EmptyState } from '@/components/EmptyState'
 import { Field } from '@/components/ops/Field'
 import { toastError } from '@/components/ops/toast'
 import { PageHeader } from '@/components/PageHeader'
+import { ProfileMultiSelect } from '@/pages/blocklist/ProfileMultiSelect'
+import { profileSetLabel, sameProfiles } from '@/pages/blocklist/profiles'
 import { StatusBadge } from '@/components/StatusBadge'
 import { TimeAgo } from '@/components/TimeAgo'
 import { Badge } from '@/components/ui/badge'
@@ -28,6 +30,7 @@ import {
   qk,
   useBlocklistChanges,
   useBlocklistLookup,
+  useBlocklistSource,
   useBlocklistProfiles,
   useBlocklistSources,
   useBuildNow,
@@ -40,6 +43,7 @@ import { fmtBytes, fmtDateTime, fmtDuration, fmtNumber, shortSha } from '@/lib/f
 import { cn, looksLikeIP } from '@/lib/utils'
 
 import { AllowDialog, AllowlistCard } from './Allowlist'
+import { RpzCard } from './Rpz'
 
 const KINDS: Record<BlocklistSourceKind, string> = {
   trustpositif_domains: 'TrustPositif domains',
@@ -48,9 +52,11 @@ const KINDS: Record<BlocklistSourceKind, string> = {
   url_ips: 'URL — IPs',
   manual_domains: 'Manual domains',
   manual_ips: 'Manual IPs',
+  rpz_domains: 'RPZ slave',
   whitelist: 'Whitelist',
 }
 const isManual = (k: BlocklistSourceKind) => k === 'manual_domains' || k === 'manual_ips' || k === 'whitelist'
+const isSlave = (k: BlocklistSourceKind) => k === 'rpz_domains'
 
 /** Sentinel for "all scopes". The global scope is a real empty string, so the selector needs
  * a distinct sentinel for it too (Radix Select forbids an empty item value). */
@@ -58,9 +64,7 @@ const ALL = '__all__'
 const GLOBAL = '__global__'
 /** Maps the selector's sentinel space to the API scope: undefined all, '' global, else profile. */
 const scopeFor = (sel: string) => (sel === ALL ? undefined : sel === GLOBAL ? '' : sel)
-/** The selector value for an API scope. */
-const selectFor = (scope: string | undefined) => (scope === undefined ? ALL : scope === '' ? GLOBAL : scope)
-const ownSources = (s: BlocklistSource, profileId: string) => s.profile_id === profileId
+const ownSources = (s: BlocklistSource, profileId: string) => s.profile_ids.includes(profileId)
 
 const buildDuration = (b: BlocklistBuild) =>
   b.finished_at ? fmtDuration((new Date(b.finished_at).getTime() - new Date(b.started_at).getTime()) / 1000) : '—'
@@ -151,6 +155,7 @@ export default function BlocklistPage() {
         onSelect={setSelected}
       />
       <AllowlistCard />
+      <RpzCard />
       <SourcesCard scope={scope} profile={profile} />
       <Card>
         <CardHeader className="flex flex-row items-start justify-between gap-2">
@@ -621,7 +626,6 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
   const update = useUpdateSource()
   const remove = useDeleteSource()
   const [editing, setEditing] = useState<BlocklistSource | 'new' | null>(null)
-  const profileName = (id: string) => id || 'Global'
 
   const columns: Column<BlocklistSource>[] = [
     {
@@ -635,7 +639,7 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
             {scope !== undefined && !ownSources(s, scope) && <Badge variant="secondary">inherited from global</Badge>}
           </div>
           <div className="max-w-80 truncate text-xs text-muted-foreground" title={s.url}>
-            {isManual(s.kind) ? 'Manual list' : s.url}
+            {isManual(s.kind) ? 'Manual list' : isSlave(s.kind) ? 'Pulled from an RPZ master' : s.url}
           </div>
         </div>
       ),
@@ -648,10 +652,12 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
     },
     {
       key: 'profile',
-      header: 'Profile',
-      sortValue: (s) => s.profile_id,
+      header: 'Profiles',
+      sortValue: (s) => s.profile_names.join(', '),
       cell: (s) => (
-        <span className={s.profile_id ? undefined : 'text-muted-foreground'}>{profileName(s.profile_id)}</span>
+        <span className={s.profile_ids.length > 0 ? undefined : 'text-muted-foreground'}>
+          {profileSetLabel(s.profile_names)}
+        </span>
       ),
     },
     { key: 'entries', header: 'Entries', align: 'right', sortValue: (s) => s.entries, cell: (s) => fmtNumber(s.entries) },
@@ -752,15 +758,65 @@ function SourcesCard({ scope, profile }: { scope: string | undefined; profile: B
 }
 
 function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource | null; profileId: string | undefined; onClose: () => void }) {
+  const detail = useBlocklistSource(source?.id)
+  const loaded = !source || !!detail.data
+  const displayed = detail.data ?? source
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{displayed ? `Edit ${displayed.name}` : 'Add blocklist source'}</DialogTitle>
+        </DialogHeader>
+        {!loaded ? (
+          detail.isError ? (
+            <div className="grid gap-4">
+              <div className="rounded-md border border-destructive/40 bg-destructive/5 p-3 text-sm">
+                <p>Could not load the source contents.</p>
+                <Button type="button" variant="outline" size="sm" className="mt-3" onClick={() => void detail.refetch()}>
+                  Retry
+                </Button>
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </div>
+          ) : (
+            <div className="grid gap-4">
+              <div className="grid gap-3" aria-label="Loading source">
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-10 w-full" />
+                <Skeleton className="h-40 w-full" />
+              </div>
+              <DialogFooter>
+                <Button type="button" variant="outline" onClick={onClose}>
+                  Cancel
+                </Button>
+              </DialogFooter>
+            </div>
+          )
+        ) : (
+          <SourceForm source={displayed} profileId={profileId} onClose={onClose} />
+        )}
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function SourceForm({ source, profileId, onClose }: { source: BlocklistSource | null; profileId: string | undefined; onClose: () => void }) {
   const profiles = useBlocklistProfiles()
   const [name, setName] = useState(source?.name ?? '')
   const [kind, setKind] = useState<BlocklistSourceKind>(source?.kind ?? 'url_domains')
   const [url, setUrl] = useState(source?.url ?? '')
   const [content, setContent] = useState(source?.content ?? '')
   const [enabled, setEnabled] = useState(source?.enabled ?? true)
-  // The dialog works in sentinel space (ALL / GLOBAL / a profile id). ALL only appears when the
-  // page filter is "all profiles", meaning "don't send profile_id, let the source be global".
-  const [profile, setProfile] = useState(source ? (source.profile_id === '' ? GLOBAL : source.profile_id) : selectFor(profileId))
+  // The dialog edits the source's profile set directly ([] = global). A new source starts
+  // from the page filter: a concrete profile preselects it, "all profiles" starts global.
+  const [profileIds, setProfileIds] = useState<string[]>(
+    source ? source.profile_ids : profileId && profileId !== '' ? [profileId] : [],
+  )
   const create = useCreateSource()
   const update = useUpdateSource()
   const manual = isManual(kind)
@@ -775,10 +831,9 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
       },
       onError: toastError,
     }
-    // A profile move is a scoped change the API treats specially (it clears the cached
-    // validators), so only send profile_id when it actually differs from the source's own.
-    const scope = scopeFor(profile)
-    const moved = source ? scope !== source.profile_id : scope !== undefined
+    // A profile-set change is a scoped change the API treats specially ([] = global), so only
+    // send profile_ids when the set actually differs from the source's own.
+    const changed = source ? !sameProfiles(profileIds, source.profile_ids) : profileIds.length > 0
     const body: BlocklistSourceCreate & BlocklistSourcePatch = {
       name: name.trim(),
       kind,
@@ -786,89 +841,72 @@ function SourceDialog({ source, profileId, onClose }: { source: BlocklistSource 
       content: manual ? content : '',
       enabled,
     }
-    if (moved) body.profile_id = scope ?? ''
+    if (changed) body.profile_ids = profileIds
     if (source) update.mutate({ id: source.id, patch: body }, done)
     else create.mutate(body, done)
   }
 
   const lines = manual ? content.split('\n').filter((l) => l.trim() && !l.trim().startsWith('#')).length : 0
   return (
-    <Dialog open onOpenChange={(o) => !o && onClose()}>
-      <DialogContent className="sm:max-w-lg">
-        <DialogHeader>
-          <DialogTitle>{source ? `Edit ${source.name}` : 'Add blocklist source'}</DialogTitle>
-        </DialogHeader>
-        <form onSubmit={submit} className="grid gap-4">
-          <Field id="src-name" label="Name">
-            <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} required />
-          </Field>
-          <Field
-            id="src-profile"
-            label="Profile"
-            hint={source ? 'Moving the source changes which profile builds it — the current build keeps it until the next one.' : 'Global sources are shared by every profile that has no own build.'}
-          >
-            <Select value={profile} onValueChange={setProfile}>
-              <SelectTrigger id="src-profile" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value={GLOBAL}>Global (shared by every profile)</SelectItem>
-                {profiles.data?.items.map((p) => (
-                  <SelectItem key={p.id} value={p.id}>
-                    {p.name}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field id="src-kind" label="Kind" hint={source ? 'The kind cannot be changed after creation.' : undefined}>
-            <Select value={kind} onValueChange={(v) => setKind(v as BlocklistSourceKind)} disabled={!!source}>
-              <SelectTrigger id="src-kind" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {Object.entries(KINDS).map(([k, label]) => (
-                  <SelectItem key={k} value={k}>
-                    {label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </Field>
-          {manual ? (
-            <Field
-              id="src-content"
-              label={kind === 'whitelist' ? 'Whitelisted domains' : 'Entries'}
-              hint={`One ${kind === 'manual_ips' ? 'IPv4 or CIDR (≤ /24)' : 'domain'} per line; # starts a comment. ${lines} entries.`}
-            >
-              <Textarea
-                id="src-content"
-                value={content}
-                onChange={(e) => setContent(e.target.value)}
-                rows={10}
-                className="max-h-80 font-mono text-xs"
-                placeholder={kind === 'manual_ips' ? '203.0.113.7\n198.51.100.0/24' : 'example.com\nbad.example.net'}
-              />
-            </Field>
-          ) : (
-            <Field id="src-url" label="URL" hint="Fetched on every build with If-None-Match / If-Modified-Since.">
-              <Input id="src-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} required placeholder="https://…" />
-            </Field>
-          )}
-          <label className="flex items-center gap-2 text-sm">
-            <Switch checked={enabled} onCheckedChange={setEnabled} />
-            Enabled
-          </label>
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={onClose}>
-              Cancel
-            </Button>
-            <Button type="submit" disabled={pending || !name.trim()}>
-              {source ? 'Save' : 'Add source'}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+    <form onSubmit={submit} className="grid gap-4">
+      <Field id="src-name" label="Name">
+        <Input id="src-name" value={name} onChange={(e) => setName(e.target.value)} required />
+      </Field>
+      <Field
+        id="src-profile"
+        label="Profiles"
+        hint={source ? 'Changing the profiles rebuilds the source for each one — the current build keeps it until the next build.' : 'Pick one or more profiles to build this source for them; leave empty to share it with every profile.'}
+      >
+        <ProfileMultiSelect id="src-profile" profiles={profiles.data?.items} value={profileIds} onChange={setProfileIds} />
+      </Field>
+      <Field id="src-kind" label="Kind" hint={source ? 'The kind cannot be changed after creation.' : undefined}>
+        <Select value={kind} onValueChange={(v) => setKind(v as BlocklistSourceKind)} disabled={!!source}>
+          <SelectTrigger id="src-kind" className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {Object.entries(KINDS)
+              .filter(([k]) => !isSlave(k as BlocklistSourceKind))
+              .map(([k, label]) => (
+                <SelectItem key={k} value={k}>
+                  {label}
+                </SelectItem>
+              ))}
+          </SelectContent>
+        </Select>
+      </Field>
+      {manual ? (
+        <Field
+          id="src-content"
+          label={kind === 'whitelist' ? 'Whitelisted domains' : 'Entries'}
+          hint={`One ${kind === 'manual_ips' ? 'IPv4 or CIDR (≤ /24)' : 'domain'} per line; # starts a comment. ${lines} entries.`}
+        >
+          <Textarea
+            id="src-content"
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            rows={10}
+            className="max-h-80 font-mono text-xs"
+            placeholder={kind === 'manual_ips' ? '203.0.113.7\n198.51.100.0/24' : 'example.com\nbad.example.net'}
+          />
+        </Field>
+      ) : (
+        <Field id="src-url" label="URL" hint="Fetched on every build with If-None-Match / If-Modified-Since.">
+          <Input id="src-url" type="url" value={url} onChange={(e) => setUrl(e.target.value)} required placeholder="https://…" />
+        </Field>
+      )}
+      <label className="flex items-center gap-2 text-sm">
+        <Switch checked={enabled} onCheckedChange={setEnabled} />
+        Enabled
+      </label>
+      <DialogFooter>
+        <Button type="button" variant="outline" onClick={onClose}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={pending || !name.trim()}>
+          {source ? 'Save' : 'Add source'}
+        </Button>
+      </DialogFooter>
+    </form>
   )
 }

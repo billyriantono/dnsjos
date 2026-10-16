@@ -240,17 +240,22 @@ const (
 	SourceManualDomains = "manual_domains"
 	SourceManualIPs     = "manual_ips"
 	SourceWhitelist     = "whitelist"
+	SourceRPZDomains    = "rpz_domains"
 )
 
 type BlocklistSource struct {
-	ID           string     `json:"id"`
-	Name         string     `json:"name"`
-	Kind         string     `json:"kind"`
-	URL          string     `json:"url"`
-	Content      string     `json:"content"`
-	Enabled      bool       `json:"enabled"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Kind    string `json:"kind"`
+	URL     string `json:"url"`
+	Content string `json:"content"`
+	Enabled bool   `json:"enabled"`
+	// ProfileID/ProfileName are the first profile, kept for the older single-profile clients.
+	// ProfileIDs/ProfileNames carry the full set; both empty means the source is global.
 	ProfileID    string     `json:"profile_id"` // "" = global (shared by every profile)
 	ProfileName  string     `json:"profile_name"`
+	ProfileIDs   []string   `json:"profile_ids"`
+	ProfileNames []string   `json:"profile_names"`
 	ETag         string     `json:"etag"`
 	LastModified string     `json:"last_modified"`
 	LastFetchAt  *time.Time `json:"last_fetch_at"`
@@ -266,8 +271,10 @@ type BlocklistSourceCreate struct {
 	URL     string `json:"url"`
 	Content string `json:"content"`
 	Enabled *bool  `json:"enabled,omitempty"`
-	// ProfileID scopes the source to one profile; empty keeps it global.
-	ProfileID string `json:"profile_id,omitempty"`
+	// ProfileIDs scopes the source to those profiles; empty keeps it global. ProfileID (one
+	// uuid) is accepted for older clients and treated as a one-element ProfileIDs.
+	ProfileID  string   `json:"profile_id,omitempty"`
+	ProfileIDs []string `json:"profile_ids,omitempty"`
 }
 
 type BlocklistSourcePatch struct {
@@ -275,9 +282,59 @@ type BlocklistSourcePatch struct {
 	URL     *string `json:"url,omitempty"`
 	Content *string `json:"content,omitempty"`
 	Enabled *bool   `json:"enabled,omitempty"`
-	// ProfileID moves the source between profiles; "" is ambiguous with "unset", so a
-	// patch cannot clear it. Empty/null leaves the profile unchanged.
-	ProfileID *string `json:"profile_id,omitempty"`
+	// ProfileIDs moves the source to exactly those profiles; null leaves it unchanged, an
+	// empty list makes it global. ProfileID (one uuid) is accepted for older clients.
+	ProfileID  *string   `json:"profile_id,omitempty"`
+	ProfileIDs *[]string `json:"profile_ids,omitempty"`
+}
+
+// RPZUpstream is an RPZ master the panel pulls the blocklist zone from via AXFR/IXFR
+// (SPEC §7.7); the transferred domain list feeds one blocklist source.
+type RPZUpstream struct {
+	ID           string     `json:"id"`
+	Name         string     `json:"name"`
+	Upstream     string     `json:"upstream"`
+	Zone         string     `json:"zone"`
+	HasTSIG      bool       `json:"has_tsig"`
+	IntervalS    int        `json:"interval_s"`
+	Serial       uint32     `json:"serial"`
+	TotalDomains int        `json:"total_domains"`
+	LastSyncAt   *time.Time `json:"last_sync_at"`
+	LastError    string     `json:"last_error"`
+	SourceID     string     `json:"source_id"`
+	ProfileID    string     `json:"profile_id"` // first profile, for older clients
+	ProfileName  string     `json:"profile_name"`
+	ProfileIDs   []string   `json:"profile_ids"` // the full set; empty = global
+	ProfileNames []string   `json:"profile_names"`
+	CreatedAt    time.Time  `json:"created_at"`
+	UpdatedAt    time.Time  `json:"updated_at"`
+}
+
+// RPZUpstreamCreate/patch payloads: TSIG secret is write-only (set, never read back).
+type RPZUpstreamCreate struct {
+	Name       string `json:"name"`
+	Upstream   string `json:"upstream"`
+	Zone       string `json:"zone"`
+	TSIGKey    string `json:"tsig_key,omitempty"`
+	TSIGSecret string `json:"tsig_secret,omitempty"` // base64; requires tsig_key
+	IntervalS  int    `json:"interval_s,omitempty"`
+	// ProfileIDs scopes the upstream (and its paired source) to those profiles; empty is
+	// global. ProfileID (one uuid) is accepted for older clients.
+	ProfileID  string   `json:"profile_id,omitempty"`
+	ProfileIDs []string `json:"profile_ids,omitempty"`
+}
+
+type RPZUpstreamPatch struct {
+	Name       *string `json:"name,omitempty"`
+	Upstream   *string `json:"upstream,omitempty"`
+	Zone       *string `json:"zone,omitempty"`
+	TSIGKey    *string `json:"tsig_key,omitempty"`
+	TSIGSecret *string `json:"tsig_secret,omitempty"` // base64; set both or none
+	IntervalS  *int    `json:"interval_s,omitempty"`
+	// ProfileIDs moves the upstream to exactly those profiles; null leaves it unchanged, an
+	// empty list makes it global. ProfileID (one uuid) is accepted for older clients.
+	ProfileID  *string   `json:"profile_id,omitempty"`
+	ProfileIDs *[]string `json:"profile_ids,omitempty"`
 }
 
 type BlocklistBuild struct {

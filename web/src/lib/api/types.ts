@@ -604,13 +604,17 @@ export type BlocklistSourceKind =
   | 'url_ips'
   | 'manual_domains'
   | 'manual_ips'
+  | 'rpz_domains'
   | 'whitelist'
 
 export interface BlocklistSource {
   id: string
   name: string
   kind: BlocklistSourceKind
-  /** Config profile that owns the source; "" = global (shared by all profiles). */
+  /** Config profiles that share the source; empty = global (shared by all profiles). */
+  profile_ids: string[]
+  profile_names: string[]
+  /** First profile, kept for single-profile clients; "" = global. */
   profile_id: string
   profile_name: string
   url: string
@@ -628,7 +632,9 @@ export interface BlocklistSource {
 export interface BlocklistSourceCreate {
   name: string
   kind: BlocklistSourceKind
-  /** Owning config profile; "" = global (shared by all profiles). */
+  /** Owning config profiles; empty/omitted = global (shared by all profiles). */
+  profile_ids?: string[]
+  /** Legacy single profile; folded into profile_ids when that is absent. */
   profile_id?: string
   url: string
   content: string
@@ -637,11 +643,64 @@ export interface BlocklistSourceCreate {
 
 export interface BlocklistSourcePatch {
   name?: string
-  /** Move the source to another profile ("" = global). */
+  /** Replace the source's profile set (empty = global). */
+  profile_ids?: string[]
+  /** Legacy single-profile move ("" = global); ignored when profile_ids is set. */
   profile_id?: string
   url?: string
   content?: string
   enabled?: boolean
+}
+
+/** An RPZ master the panel pulls the blocklist zone from via AXFR/IXFR (SPEC §7.7). */
+export interface RPZUpstream {
+  id: string
+  name: string
+  upstream: string
+  zone: string
+  has_tsig: boolean
+  interval_s: number
+  serial: number
+  total_domains: number
+  last_sync_at: string | null
+  last_error: string
+  source_id: string
+  /** Config profiles that share the RPZ master; empty = global. */
+  profile_ids: string[]
+  profile_names: string[]
+  /** First profile, kept for single-profile clients; "" = global. */
+  profile_id: string
+  profile_name: string
+  created_at: string
+  updated_at: string
+}
+
+/** TSIG secret is write-only: set both tsig_key and tsig_secret, or neither. */
+export interface RPZUpstreamCreate {
+  name: string
+  upstream: string
+  zone: string
+  tsig_key?: string
+  tsig_secret?: string
+  interval_s?: number
+  /** Owning config profiles; empty/omitted = global. */
+  profile_ids?: string[]
+  /** Legacy single profile; folded into profile_ids when that is absent. */
+  profile_id?: string
+}
+
+export interface RPZUpstreamPatch {
+  name?: string
+  upstream?: string
+  zone?: string
+  /** Replace the RPZ master's profile set (empty = global). */
+  profile_ids?: string[]
+  /** Legacy single-profile move ("" = global); ignored when profile_ids is set. */
+  profile_id?: string
+  /** "" clears TSIG. */
+  tsig_key?: string
+  tsig_secret?: string
+  interval_s?: number
 }
 
 export type BuildStatus = 'running' | 'ok' | 'failed' | 'skipped'

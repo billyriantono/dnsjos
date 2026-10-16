@@ -738,6 +738,38 @@ seconds, fleet-wide, without a build or a dnsdist restart:
 * The blocklist lookup reports `allowed` and the matching entry, so the UI can show
   "blocked by the list but allowed".
 
+### 7.7 RPZ slave (in-panel AXFR/IXFR pull)
+
+The regulator's RPZ master publishes the blocklist as a DNS zone. Instead of running a
+separate relay host, the panel itself is an RPZ secondary: it pulls the zone from the
+master over AXFR/IXFR and writes the transferred domains into a normal blocklist source,
+so the rest of the pipeline (§7.2 build → per-profile CDB → §7.4 serving) is unchanged.
+Only the panel needs the master's allow-IP and TSIG key; nodes keep downloading the CDB
+from the panel and never talk to the master.
+
+* A **rpz upstream** (`rpz_upstreams`) is one master endpoint: `name`, `upstream`
+  (`host:port`), `zone` (FQDN), optional `tsig_key`/`tsig_secret` (base64, HMAC-SHA256),
+  and an `interval_s` (60–86400, default 900). An upstream always owns exactly one
+  blocklist source of `kind = rpz_domains`: creating an upstream creates the paired source
+  in the same transaction, and its `profile_id` scopes which build sees it. Deleting the
+  upstream deletes the source.
+* CRUD is `GET/POST /api/v1/rpz/upstreams`, `PATCH/DELETE /api/v1/rpz/upstreams/{id}`, and
+  `POST /api/v1/rpz/upstreams/{id}/sync` forces one transfer now. The TSIG secret is
+  write-only: `api.RPZUpstream` exposes only `has_tsig`. `tsig_key`/
+  `tsig_secret` are set as a pair; sending `tsig_key: ""` clears TSIG.
+* The **`rpz-sync` job** (every minute) visits each upstream whose source is still enabled
+  and whose interval has elapsed. It queries the zone SOA; when the serial equals the last
+  transfer it does nothing, otherwise it does a full **AXFR** (no local serial yet) or an
+  **IXFR** from the stored serial and atomically rewrites `blocklist_sources.content`
+  (`serial`, `total_domains`, `last_sync_at` updated; a failure is recorded in
+  `last_error` without stopping the other upstreams). A transfer is capped at 10 M records.
+* Blocked domains are the owners of every **CNAME/A/AAAA** record inside the zone, minus the
+  apex, normalized by the same rules as §7.2 (so `sub.blocked.example` in the zone becomes
+  the domain `sub.blocked.example`). Once written to the source's content, a build treats
+  the source exactly like a manual list.
+* A manual `POST …/sync` returns the refreshed `api.RPZUpstream`, or 502 `upstream_error`
+  with the transfer failure (also stored in `last_error`).
+
 ## 8. Agent protocol (`/agent/v1`, bearer = node token)
 
 All agent requests carry `Authorization: Bearer <node_token>` and
@@ -897,7 +929,7 @@ Every body/response type below lives in `internal/shared/api` and is mirrored 1:
 | `POST /api/v1/profiles/{id}/versions/{v}/publish` | → `ConfigVersion`; `?staged=true` = one node at a time (§6.5): 422 `invalid_rollout`, 409 `upgrade_running`/`nodes_not_ready`, `Location` of the run. A plain publish clears the profile's pins; 409 `upgrade_running` while a config run of that profile is active |
 | `GET /api/v1/profiles/{id}/versions/{a}/diff/{b}` | `ConfigVersionDiff{a,b,changes}` — both versions plus `SpecChange{path,op,old,new}` entries turning a into b |
 | `POST /api/v1/profiles/{id}/preview` | `PreviewRequest{spec}` (validated, not saved) → `RenderedConfig` |
-| `GET/POST /api/v1/blocklist/sources` · `PATCH/DELETE /blocklist/sources/{id}` | `List[BlocklistSource]` · `BlocklistSourceCreate{...,profile_id?}` → 201 `BlocklistSource` · `BlocklistSourcePatch{...,profile_id?}` → `BlocklistSource` · 204. `?profile_id=` (empty = global) filters by scope; `profile_id` on a source/build is `""` for the global scope plus the owning `profile_name` |
+| `GET/POST /api/v1/blocklist/sources` · `GET /api/v1/blocklist/sources/{id}` · `PATCH/DELETE /blocklist/sources/{id}` | The source list intentionally returns `content: ""` (content can be hundreds of MB for an RPZ source); the detail GET returns the full `BlocklistSource` for the edit form. `BlocklistSourceCreate{...,profile_id?}` → 201 `BlocklistSource` · `BlocklistSourcePatch{...,profile_id?}` → `BlocklistSource` · 204. `?profile_id=` (empty = global) filters by scope; `profile_id` on a source/build is `""` for the global scope plus the owning `profile_name` |
 | `GET /api/v1/blocklist/builds` · `POST /blocklist/builds` · `GET /blocklist/current` | `List[BlocklistBuild]` (newest first) · build now → 202 `BlocklistBuild` · current `BlocklistBuild` or `null`. `?profile_id=` (empty = global) scopes the list, the trigger and the lookup; omitted = every scope (POST builds the global scope) |
 | `GET /api/v1/blocklist/profiles` | `List[BlocklistProfile{id,name,description,source_count,own_build,effective_build,uses_global}]` — every config profile with its blocklist scope; `uses_global` when it has no build of its own and is served the global one |
 | `GET /api/v1/blocklist/lookup?name=` | `BlocklistLookup{name,blocked,match,allowed,allow_entry}` (checks current CDB incl. suffix walk; `allowed`/`allow_entry` = the most specific active allowlist entry covering the name or IP, else `false`/`null`) |
