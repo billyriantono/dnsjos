@@ -63,6 +63,10 @@ func TestGolden(t *testing.T) {
 			s.Abuse.Enabled, s.CGK.Enabled, s.Analytics.Enabled = false, false, false
 			s.Blocking.BlockResponseIPs = true
 		},
+		"blockpage_multi": func(s *api.ConfigSpec) { // multi-IP fallback: all answered
+			s.Blocking.BlockpageIPv4 = "103.155.190.72, 103.155.190.73"
+			s.Blocking.BlockpageIPv6 = "2001:db8::10, 2001:db8::11"
+		},
 		"weights": func(s *api.ConfigSpec) {
 			s.Upstreams.Policy = "wrandom"
 			s.Upstreams.Servers = []api.Upstream{
@@ -209,6 +213,29 @@ func TestLuaString(t *testing.T) {
 		if got := luaString(in); got != want {
 			t.Errorf("luaString(%q) = %s, want %s", in, got, want)
 		}
+	}
+}
+
+func TestBlockpageIPs(t *testing.T) {
+	got, err := parseBlockpageIPs("103.155.190.72, 103.155.190.73", true)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("parse multi v4 = %v, %v", got, err)
+	}
+	if spoofAddrs(got) != `{"103.155.190.72", "103.155.190.73"}` {
+		t.Errorf("spoof multi = %s", spoofAddrs(got))
+	}
+	one, err := parseBlockpageIPs("192.0.2.10", true)
+	if err != nil || spoofAddrs(one) != `"192.0.2.10"` {
+		t.Errorf("single must stay a bare string: %v, %v", one, err)
+	}
+	for _, bad := range []string{"", "nope", "::1", "192.0.2.1, 2001:db8::1",
+		"192.0.2.1, 192.0.2.2, 192.0.2.3, 192.0.2.4, 192.0.2.5, 192.0.2.6, 192.0.2.7, 192.0.2.8, 192.0.2.9"} {
+		if _, err := parseBlockpageIPs(bad, true); err == nil {
+			t.Errorf("parseBlockpageIPs(%q) accepted", bad)
+		}
+	}
+	if _, err := parseBlockpageIPs("1.2.3.4", false); err == nil {
+		t.Error("v6 field accepted v4")
 	}
 }
 

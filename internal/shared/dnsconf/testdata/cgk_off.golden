@@ -160,8 +160,8 @@ local dnstap = newFrameStreamTcpLogger("127.0.0.1:6000")
 addAction(blocked(), DnstapLogAction("dns1.example", dnstap), {name = "dnsjos-blocked-log"})
 
 -- Answers; every qtype not listed gets NODATA (so HTTPS/SVCB/ANY resolve nothing).
-addAction(AndRule({blocked(), QTypeRule(DNSQType.A)}), SpoofAction("192.0.2.10"), {name = "dnsjos-block-a"})
-addAction(AndRule({blocked(), QTypeRule(DNSQType.AAAA)}), SpoofAction("2001:db8::10"), {name = "dnsjos-block-aaaa"})
+addAction(AndRule({blocked(), QTypeRule(DNSQType.A)}), SpoofAction("192.0.2.10", {ttl = 60}), {name = "dnsjos-block-a"})
+addAction(AndRule({blocked(), QTypeRule(DNSQType.AAAA)}), SpoofAction("2001:db8::10", {ttl = 60}), {name = "dnsjos-block-aaaa"})
 addAction(AndRule({blocked(), QTypeRule(DNSQType.TXT)}), SpoofRawAction("ABLOCKED. UU No 19, pasal 40 (2a dan 2b). Permen Kominfo No 5 2020", {ttl = 60}), {name = "dnsjos-block-txt"})
 addAction(AndRule({blocked(), QTypeRule(DNSQType.SOA)}), SpoofRawAction("\007blocked\007invalid\000\006nobody\007blocked\007invalid\000\000\000\000\001\000\000\014\016\000\000\004\176\000\009:\128\000\000*0"), {name = "dnsjos-block-soa"})
 addAction(AndRule({blocked(), QTypeRule(DNSQType.NS)}), SpoofRawAction("\002ns\007blocked\007invalid\000"), {name = "dnsjos-block-ns"})

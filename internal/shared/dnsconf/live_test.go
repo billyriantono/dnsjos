@@ -163,6 +163,29 @@ func startDnsdistMut(t *testing.T, ips map[string][]string, mut ...func(*api.Con
 	return d
 }
 
+// TestLiveBlockingMultiBlockpage checks a comma-separated blockpage is served as
+// multiple A answers (fallback) against a real dnsdist.
+func TestLiveBlockingMultiBlockpage(t *testing.T) {
+	d := startDnsdistMut(t, map[string][]string{}, func(s *api.ConfigSpec) {
+		s.Blocking.BlockpageIPv4 = "192.0.2.10, 192.0.2.11"
+	})
+	r := d.query("blocked.example.", dns.TypeA)
+	if len(r.Answer) != 2 {
+		t.Fatalf("multi blockpage answers = %v", r.Answer)
+	}
+	got := map[string]bool{}
+	for _, rr := range r.Answer {
+		a, ok := rr.(*dns.A)
+		if !ok || a.Hdr.Ttl > 60 {
+			t.Fatalf("multi blockpage rr = %v", rr)
+		}
+		got[a.A.String()] = true
+	}
+	if !got["192.0.2.10"] || !got["192.0.2.11"] {
+		t.Fatalf("multi blockpage missing fallback IP: %v", got)
+	}
+}
+
 // TestLiveBlocking checks the response-IP rewrite, its counting on repeated queries
 // (cache) and the per-rule hit counters / metric names.
 func TestLiveBlocking(t *testing.T) {

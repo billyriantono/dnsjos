@@ -126,11 +126,23 @@ func (s ConfigSpec) Validate() error {
 	between("cache.stale_ttl", c.StaleTTL, 0, 604800)
 
 	b := s.Blocking
-	if a, err := netip.ParseAddr(b.BlockpageIPv4); b.Enabled && (err != nil || !a.Is4()) {
-		bad("blocking.blockpage_ipv4", "%q is not an IPv4 address", b.BlockpageIPv4)
+	for _, f := range strings.FieldsFunc(b.BlockpageIPv4, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if a, err := netip.ParseAddr(f); b.Enabled && (err != nil || a.Zone() != "" || !a.Is4()) {
+			bad("blocking.blockpage_ipv4", "%q is not an IPv4 address", f)
+			break
+		}
 	}
-	if a, err := netip.ParseAddr(b.BlockpageIPv6); b.Enabled && (err != nil || !a.Is6() || a.Is4In6()) {
-		bad("blocking.blockpage_ipv6", "%q is not an IPv6 address", b.BlockpageIPv6)
+	for _, f := range strings.FieldsFunc(b.BlockpageIPv6, func(r rune) bool { return r == ',' || r == ' ' }) {
+		if a, err := netip.ParseAddr(f); b.Enabled && (err != nil || a.Zone() != "" || !a.Is6() || a.Is4In6()) {
+			bad("blocking.blockpage_ipv6", "%q is not an IPv6 address", f)
+			break
+		}
+	}
+	if b.Enabled && len(strings.FieldsFunc(b.BlockpageIPv4, func(r rune) bool { return r == ',' || r == ' ' })) > 8 {
+		bad("blocking.blockpage_ipv4", "max 8 addresses, comma-separated")
+	}
+	if b.Enabled && len(strings.FieldsFunc(b.BlockpageIPv6, func(r rune) bool { return r == ',' || r == ' ' })) > 8 {
+		bad("blocking.blockpage_ipv6", "max 8 addresses, comma-separated")
 	}
 	if len(b.TXT) > 255 {
 		bad("blocking.txt", "max 255 characters")
