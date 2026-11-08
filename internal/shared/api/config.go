@@ -29,16 +29,52 @@ type ConfigSpec struct {
 }
 
 type Listen struct {
-	Do53 Do53 `json:"do53"`
-	DoH  DoH  `json:"doh"`
-	DoT  DoT  `json:"dot"`
-	TLS  TLS  `json:"tls"`
+	Do53   Do53   `json:"do53"`
+	DoH    DoH    `json:"doh"`
+	DoT    DoT    `json:"dot"`
+	TLS    TLS    `json:"tls"`
+	TProxy TProxy `json:"tproxy"`
 }
 
 type Do53 struct {
 	Enabled            bool     `json:"enabled"`
 	Addresses          []string `json:"addresses"`
 	ReusePortListeners int      `json:"reuse_port_listeners"`
+}
+
+// TProxyDefaultPort is where dnsdist accepts queries redirected by the node's netfilter
+// rules when TProxy.Port is 0.
+const TProxyDefaultPort = 5300
+
+// TProxy makes the node intercept DNS queries that pass through it (a gateway/router)
+// and send them to dnsdist without touching client settings. dnsdist has no
+// IP_TRANSPARENT/TPROXY sockets and cannot bind a non-local destination, so the agent
+// installs an nftables REDIRECT into a dedicated dnsdist listener. REDIRECT keeps the
+// client source address, which is what dnsdist policies, abuse limits and analytics need.
+// It does not rewrite answers or touch traffic that is not DNS on port 53.
+type TProxy struct {
+	Enabled bool `json:"enabled"`
+	// Port is the dnsdist listener for redirected queries. 0 = 5300. It must not collide
+	// with another dnsdist listener (especially port 53).
+	Port int `json:"port"`
+	// Sources limits interception to these client CIDRs (empty = every client). They are
+	// added to the dnsdist ACL automatically: a redirected client that the ACL refuses
+	// would get no answer at all.
+	Sources []string `json:"sources"`
+	// ExcludeDst are destination CIDRs never intercepted (upstream servers are always
+	// excluded automatically, so dnsdist's own recursive traffic cannot loop back).
+	ExcludeDst []string `json:"exclude_dst"`
+	// Interfaces limits interception to traffic arriving on these interfaces
+	// (empty = every interface).
+	Interfaces []string `json:"interfaces"`
+}
+
+// EffectivePort is TProxy.Port with the default applied.
+func (t TProxy) EffectivePort() int {
+	if t.Port == 0 {
+		return TProxyDefaultPort
+	}
+	return t.Port
 }
 
 type DoH struct {
@@ -293,10 +329,11 @@ func DefaultConfigSpec() ConfigSpec {
 	}
 	return ConfigSpec{
 		Listen: Listen{
-			Do53: Do53{Enabled: true, Addresses: []string{"0.0.0.0:53", "[::]:53"}, ReusePortListeners: 1},
-			DoH:  DoH{Addresses: []string{"0.0.0.0:443", "[::]:443"}, Path: "/dns-query"},
-			DoT:  DoT{Addresses: []string{"0.0.0.0:853", "[::]:853"}},
-			TLS:  TLS{CertFile: "/etc/dnsdist/tls/cert.pem", KeyFile: "/etc/dnsdist/tls/key.pem"},
+			Do53:   Do53{Enabled: true, Addresses: []string{"0.0.0.0:53", "[::]:53"}, ReusePortListeners: 1},
+			DoH:    DoH{Addresses: []string{"0.0.0.0:443", "[::]:443"}, Path: "/dns-query"},
+			DoT:    DoT{Addresses: []string{"0.0.0.0:853", "[::]:853"}},
+			TLS:    TLS{CertFile: "/etc/dnsdist/tls/cert.pem", KeyFile: "/etc/dnsdist/tls/key.pem"},
+			TProxy: TProxy{Port: TProxyDefaultPort},
 		},
 		// Private, CGNAT, loopback and link-local space only. Add your own public customer
 		// prefixes in the panel (a profile or node override) — they are deployment data.
@@ -353,8 +390,8 @@ func DefaultConfigSpec() ConfigSpec {
 			AliasesWanted: 8, MinOK: 3, RefreshIntervalH: 6,
 		},
 		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, AnswerMode: AnswerModeFastestIP, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
-		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                // opt-in: see DualStack
-		IPAlias:    IPAlias{},                                                                      // opt-in: pin CDN answers to a chosen edge
+		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                                                 // opt-in: see DualStack
+		IPAlias:    IPAlias{},                                                                                                       // opt-in: pin CDN answers to a chosen edge
 		DNSSEC:     DNSSEC{Exclude: []string{}},
 		Tuning:     Tuning{UDPBufferBytes: 16777216},
 		Webserver:  Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},

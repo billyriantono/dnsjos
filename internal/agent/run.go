@@ -26,6 +26,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/agent/dnstap"
 	"github.com/billyriantono/dnsjos/internal/agent/dualstack"
 	"github.com/billyriantono/dnsjos/internal/agent/speedcheck"
+	"github.com/billyriantono/dnsjos/internal/agent/tproxy"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
@@ -64,6 +65,7 @@ type agent struct {
 	applyErr   string
 	fetchErr   bool // applyErr came from a 409 on GET /config, not from applying
 	blErr      string
+	tpPending  bool // the redirect rules failed to install; retry even without a new config
 	wantSHA    string
 	cgkStatus  api.CGKStatus
 	cgkForce   bool
@@ -208,10 +210,21 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	}
 	if cfg == nil { // 304: the panel serves the version we run again (e.g. a staged rollout pinned us back)
 		a.mu.Lock()
+		needTP, cur := a.tpPending, a.cfg
 		if a.fetchErr {
 			a.applyErr, a.fetchErr = "", false
 		}
 		a.mu.Unlock()
+		if needTP && cur != nil {
+			if err := tproxy.Apply(ctx, a.o.Root, cur.Spec, a.o.NoSystemd, a.o.Log); err != nil {
+				a.o.Log.Warn("retrying the DNS redirect rules failed", "err", err)
+			} else {
+				a.mu.Lock()
+				a.tpPending, a.applyErr = false, ""
+				a.mu.Unlock()
+				poke(a.hbNow)
+			}
+		}
 		return
 	}
 	a.mu.Lock()
@@ -228,14 +241,27 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	changed, err := a.app.Apply(ctx, cfg.Spec, a.runtime(), force)
 	a.opMu.Unlock()
 	poke(a.alNow) // after the apply: dnsdist now runs the blocking.lua that can reload
+	var tpErr error
+	if err == nil {
+		// The dnsdist config is live even if the redirect cannot be installed; report both
+		// so the panel shows the node as running the version with a visible tproxy error.
+		tpErr = tproxy.Apply(ctx, a.o.Root, cfg.Spec, a.o.NoSystemd, a.o.Log)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
 		a.applyErr, a.fetchErr = fmt.Sprintf("config v%d: %v", cfg.Version, err), false
+		a.tpPending = false // the redirect must not follow a config dnsdist refused
 		a.o.Log.Error("config apply failed", "version", cfg.Version, "err", err)
 		return
 	}
-	a.applied, a.applyErr, a.fetchErr = cfg.Version, "", false
+	if tpErr != nil {
+		a.applied, a.applyErr, a.fetchErr = cfg.Version, fmt.Sprintf("config v%d: tproxy: %v", cfg.Version, tpErr), false
+		a.tpPending = true
+		a.o.Log.Error("DNS redirect apply failed", "version", cfg.Version, "err", tpErr)
+		return
+	}
+	a.applied, a.applyErr, a.fetchErr, a.tpPending = cfg.Version, "", false, false
 	if changed {
 		a.dnsdistVer = dnsdistVersion(ctx, a.run)
 		a.o.Log.Info("config applied", "version", cfg.Version, "profile", cfg.Profile)

@@ -81,10 +81,17 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 	if n := spec.Tuning.UDPBufferBytes; n > 0 {
 		w("setUDPSocketBufferSizes(%d, %d)\n", n, n)
 	}
-	acl, err := prefixes(spec.ACL)
+	// Clients we intercept must be allowed through dnsdist's ACL; add the redirect
+	// sources so a gateway does not silently REFUSE the traffic it redirected.
+	aclList := spec.ACL
+	if spec.Listen.TProxy.Enabled {
+		aclList = append(append([]string(nil), spec.ACL...), spec.Listen.TProxy.Sources...)
+	}
+	acl, err := prefixes(aclList)
 	if err != nil {
 		return nil, fmt.Errorf("acl: %w", err)
 	}
+	acl = dedupe(acl)
 	w("setACL(%s)\n", luaList(acl))
 
 	l := spec.Listen
@@ -102,6 +109,17 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 				}
 				w("%s(%s, {reusePort = true})\n", fn, luaString(ap))
 			}
+		}
+	}
+	if l.TProxy.Enabled {
+		p := l.TProxy.EffectivePort()
+		for _, a := range []string{fmt.Sprintf("0.0.0.0:%d", p), fmt.Sprintf("[::]:%d", p)} {
+			fn := "addLocal"
+			if first {
+				// No Do53 address used setLocal: replace dnsdist's default 127.0.0.1:53.
+				fn, first = "setLocal", false
+			}
+			w("%s(%s, {reusePort = true})\n", fn, luaString(a))
 		}
 	}
 	cert, key := luaString(l.TLS.CertFile), luaString(l.TLS.KeyFile)
@@ -408,6 +426,20 @@ func luaList(items []string) string {
 		q[i] = luaString(s)
 	}
 	return "{" + strings.Join(q, ", ") + "}"
+}
+
+// dedupe removes repeated entries, keeping the first occurrence (ACL order).
+func dedupe(items []string) []string {
+	out := make([]string, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, s := range items {
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
 }
 
 // addrPort normalises "ip:port" ("[::]:53" style for IPv6).

@@ -8,6 +8,18 @@ export interface Do53 {
   addresses: string[]
   reuse_port_listeners: number
 }
+/** §6.13: nftables REDIRECT of passing DNS queries into dnsdist (gateway/router nodes). */
+export interface TProxy {
+  enabled: boolean
+  /** dnsdist listener for redirected queries; 0 = 5300. Must not collide with another listener. */
+  port: number
+  /** Client CIDRs to intercept; empty = every client. Added to the dnsdist ACL automatically. */
+  sources: string[]
+  /** Destination CIDRs never intercepted; upstream servers are always excluded. */
+  exclude_dst: string[]
+  /** Ingress interfaces to intercept; empty = every interface. */
+  interfaces: string[]
+}
 export interface DoH {
   enabled: boolean
   addresses: string[]
@@ -26,6 +38,7 @@ export interface Listen {
   doh: DoH
   dot: DoT
   tls: TLS
+  tproxy: TProxy
 }
 
 export type ServerPolicy = 'whashed' | 'whashedLatency' | 'wrandom' | 'leastOutstanding' | 'roundrobin' | 'firstAvailable'

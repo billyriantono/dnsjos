@@ -180,7 +180,8 @@ panel on save and in the agent before rendering.
     "do53": {"enabled": true, "addresses": ["0.0.0.0:53", "[::]:53"], "reuse_port_listeners": 1},
     "doh":  {"enabled": false, "addresses": ["0.0.0.0:443", "[::]:443"], "path": "/dns-query"},
     "dot":  {"enabled": false, "addresses": ["0.0.0.0:853", "[::]:853"]},
-    "tls":  {"cert_file": "/etc/dnsdist/tls/cert.pem", "key_file": "/etc/dnsdist/tls/key.pem"}
+    "tls":  {"cert_file": "/etc/dnsdist/tls/cert.pem", "key_file": "/etc/dnsdist/tls/key.pem"},
+    "tproxy": {"enabled": false, "port": 5300, "sources": [], "exclude_dst": [], "interfaces": []}  // §6.14
   },
   "acl": ["10.0.0.0/8", "100.64.0.0/10", "…"],            // client allowlist
   "upstreams": {
@@ -299,9 +300,12 @@ agent on first run and persisted in `/var/lib/dnsjos/secrets.json`, mode 0600),
 Rendering rules (must be byte-for-byte deterministic for the same input):
 
 1. `setUDPSocketBufferSizes(n, n)` first (before listeners).
-2. `setACL({...})` with spec.acl.
+2. `setACL({...})` with spec.acl, plus `listen.tproxy.sources` when TProxy is enabled
+   (deduplicated, `spec.acl` order first).
 3. Do53: for each address, `addLocal(addr, {reusePort=true})` repeated
    `reuse_port_listeners` times (first one via `setLocal`).
+   TProxy: `addLocal("0.0.0.0:<port>")` and `addLocal("[::]:<port>")` (`port` 0 = 5300);
+   the kernel redirect itself is managed by the agent (§6.14).
 4. DoH: `addDOHLocal(addr, cert, key, path)`; DoT: `addTLSLocal(addr, cert, key)`.
 5. `controlSocket("127.0.0.1:5199")`, `setKey(console_key)`, `setConsoleACL("127.0.0.1/32")`.
 6. `webserver(webserver.listen)`, `setWebserverConfig({password=…, apiKey=…, acl=…, statsRequireAuthentication=true})`.
@@ -635,6 +639,38 @@ only rewrites):
   latest per node (`nodes.speedcheck`, `speedcheck_checked`, `speedcheck_at`, migration
   `0014`) and serves it at `GET /api/v1/nodes/{id}/speedcheck`, shown on the node's Speed
   check tab (the qname view the profile editor never had).
+
+### 6.14 TProxy (transparent DNS redirect)
+
+For a node that is also a gateway/router: intercept DNS queries passing through it and
+answer them with dnsdist, without changing client settings. `listen.tproxy` (`api.TProxy`):
+
+* `enabled` — the agent installs an nftables table `inet dnsjos_tproxy` with a `nat`
+  `prerouting` chain that redirects UDP and TCP port 53 to `port` (0 = 5300). The
+  dnsdist config gets `addLocal("0.0.0.0:<port>")` and `addLocal("[::]:<port>")`, and the
+  port is validated against every other dnsdist listener and its webserver.
+* **REDIRECT, not IP_TRANSPARENT.** dnsdist has no `IP_TRANSPARENT`/TPROXY socket option
+  and cannot accept packets delivered to a non-local destination. The agent therefore uses
+  netfilter `redirect`: the kernel performs the destination translation, preserves the
+  client source address (so ACL, abuse limits, blocklists and analytics behave exactly as
+  for direct clients), and dnsdist answers from its own local address. No sidecar process
+  sits in the query path, so a lost agent does not blackhole DNS.
+* `sources` limits interception to client CIDRs (empty = every client) and is appended to
+  the emitted `setACL`; a redirected client the ACL refuses would get no answer.
+* `exclude_dst` are destination CIDRs never intercepted. Upstreams are not excluded: the
+  chain only runs in `prerouting`, so dnsdist's own upstream queries (locally generated,
+  `output`/`postrouting`) never reach it. Excluding upstream addresses would let clients
+  bypass the redirect by querying them directly.
+* `interfaces` limits interception to traffic arriving on those interfaces (empty = all).
+* The agent owns `/var/lib/dnsjos/dnsjos-tproxy.nft`,
+  `/usr/local/lib/dnsjos/tproxy-apply.sh` and the oneshot unit
+  `dnsjos-tproxy.service` (enabled at boot). When the section is disabled the unit and the
+  nft table are removed. `nftables` is installed by `install.sh`.
+* The redirect port is a normal local UDP/TCP port after translation. If the node has an
+  INPUT firewall that only allows port 53, allow the redirect port too (or dnsdist never
+  sees the intercepted queries).
+* The rule is evaluated in `prerouting`, i.e. for forwarded traffic. Locally generated
+  queries (the node itself) are not redirected; use the node's normal resolver for those.
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 

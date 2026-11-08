@@ -99,6 +99,19 @@ func TestGolden(t *testing.T) {
 			s.Tuning.ExtraLua = "-- custom\nsetVerbose(true)\n"
 			s.Blocking.TXT = `He said "hi" \ bye`
 		},
+		"tproxy": func(s *api.ConfigSpec) {
+			s.Listen.TProxy = api.TProxy{
+				Enabled:    true,
+				Port:       5300,
+				Sources:    []string{"10.0.0.0/8", "2001:db8::/32"},
+				ExcludeDst: []string{"4.4.4.4", "2001:4860:4860::8888"},
+				Interfaces: []string{"eth0", "eth1.100"},
+			}
+		},
+		"tproxy_only": func(s *api.ConfigSpec) {
+			s.Listen.Do53.Enabled = false
+			s.Listen.TProxy = api.TProxy{Enabled: true}
+		},
 	}
 	for name, mut := range cases {
 		t.Run(name, func(t *testing.T) {

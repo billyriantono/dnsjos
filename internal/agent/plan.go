@@ -128,6 +128,12 @@ func summary(cfg *api.AgentConfig, sha, cdb string) string {
 	} else {
 		p("dot:        off")
 	}
+	if tp := l.TProxy; tp.Enabled {
+		p("tproxy:     on (port 53 -> :%d, %d source(s), %d excluded destination(s), %d interface(s))",
+			tp.EffectivePort(), len(tp.Sources), len(tp.ExcludeDst), len(tp.Interfaces))
+	} else {
+		p("tproxy:     off")
+	}
 	if l.DoH.Enabled || l.DoT.Enabled {
 		p("tls:        cert %s key %s", l.TLS.CertFile, l.TLS.KeyFile)
 	}

@@ -57,3 +57,6 @@ export function isIPPort(s: string) {
 }
 
 export const isHostname = (s: string) => s.length <= 253 && HOST.test(s)
+
+/** Linux network interface name (IFNAMSIZ 15 bytes; VLAN/bond names use '.', '-', ':' and '@'). */
+export const isInterface = (s: string) => /^[A-Za-z0-9_.:@-]{1,15}$/.test(s)
