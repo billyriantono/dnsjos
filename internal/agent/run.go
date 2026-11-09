@@ -145,6 +145,12 @@ func newAgent(ctx context.Context, o Options) (*agent, error) {
 	return a, nil
 }
 
+// restartRelayAfterUpgrade makes the transparent relay run the new agent binary after an
+// agent upgrade. Remove it once the relay no longer embeds the agent.
+func (a *agent) restartRelayAfterUpgrade(ctx context.Context) {
+	tproxy.RestartRelay(ctx, a.o.Log)
+}
+
 func (a *agent) config() *api.AgentConfig {
 	a.mu.Lock()
 	defer a.mu.Unlock()

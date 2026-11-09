@@ -295,3 +295,34 @@ func TestRelayTCPRoundTrip(t *testing.T) {
 		t.Fatal("dnsdist never saw the TCP query")
 	}
 }
+
+// TestRelayDirectToLocalPort covers a client querying the interception port on the
+// node's own address (no TPROXY). The reply must not create a socket that shadows the
+// listener and swallows later queries.
+func TestRelayDirectToLocalPort(t *testing.T) {
+	requireTransparent(t)
+	b := startBackend(t)
+	port := freePort(t)
+	startRelay(t, port, net.JoinHostPort("127.0.0.1", strconv.Itoa(b.port)))
+
+	client, err := net.DialUDP("udp4", nil, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_ = client.SetDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 65535)
+	for i := 0; i < 5; i++ {
+		id := uint16(0x4000 + i)
+		if _, err := client.Write(dnsQuery(id)); err != nil {
+			t.Fatalf("query %d: %v", i, err)
+		}
+		n, err := client.Read(buf)
+		if err != nil {
+			t.Fatalf("query %d: no reply: %v", i, err)
+		}
+		if got := binary.BigEndian.Uint16(buf[:2]); got != id || n < 12 {
+			t.Fatalf("query %d: reply id %#x, %d bytes", i, got, n)
+		}
+	}
+}

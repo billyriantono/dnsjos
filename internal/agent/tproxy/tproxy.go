@@ -455,6 +455,18 @@ func activeUnit(ctx context.Context, name string) bool {
 	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", name).Run() == nil
 }
 
+// RestartRelay restarts the transparent relay when it is active. An agent upgrade
+// replaces /usr/local/bin/dnsjos-agent, but the running relay keeps the old inode; this
+// makes it pick up the new binary immediately instead of on the next crash or reboot.
+func RestartRelay(ctx context.Context, log *slog.Logger) {
+	if !activeUnit(ctx, RelayUnitName) {
+		return
+	}
+	if err := run(ctx, "systemctl", "restart", RelayUnitName); err != nil {
+		log.Warn("restarting the TPROXY relay after the agent upgrade failed", "err", err)
+	}
+}
+
 func run(ctx context.Context, name string, args ...string) error {
 	out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 	if err != nil {

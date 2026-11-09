@@ -158,6 +158,8 @@ type relay struct {
 
 	mu         sync.Mutex
 	clientConn map[netip.AddrPort]*clientSock
+	local      map[netip.Addr]bool
+	localAt    time.Time
 	closed     bool
 	done       chan struct{}
 }
@@ -289,13 +291,71 @@ func (r *relay) readBackend(b *udpBackend) {
 }
 
 func (r *relay) sendToClient(from, to netip.AddrPort, payload []byte) error {
-	conn, err := r.clientSocket(from)
+	conn, err := r.replySocket(from)
 	if err != nil {
 		return err
 	}
 	dst := &net.UDPAddr{IP: net.IP(to.Addr().AsSlice()), Port: int(to.Port())}
 	_, err = conn.WriteToUDP(payload, dst)
 	return err
+}
+
+// replySocket returns the socket an answer to to is sent from. When the original
+// destination is one of this node's own addresses (a client queried the interception
+// port directly instead of being intercepted), the listener already owns that
+// address:port and a transparent socket bound to it would shadow the listener and
+// swallow later queries. Answer through the listener in that case.
+func (r *relay) replySocket(from netip.AddrPort) (*net.UDPConn, error) {
+	if r.isLocal(from.Addr()) {
+		if c := r.listenerFor(from); c != nil {
+			return c, nil
+		}
+	}
+	c, err := r.clientSocket(from)
+	if err == nil {
+		return c, nil
+	}
+	if c := r.listenerFor(from); c != nil {
+		r.cfg.Log.Debug("tproxy relay: transparent reply socket unavailable, answering from the listener",
+			"dest", from, "err", err)
+		return c, nil
+	}
+	return nil, err
+}
+
+func (r *relay) listenerFor(from netip.AddrPort) *net.UDPConn {
+	if from.Addr().Is4() {
+		return r.udp4
+	}
+	return r.udp6
+}
+
+// isLocal reports whether addr is configured on this node. The set is refreshed every
+// 30s so address changes are picked up without a restart.
+func (r *relay) isLocal(addr netip.Addr) bool {
+	r.mu.Lock()
+	if time.Since(r.localAt) < 30*time.Second && r.local != nil {
+		local := r.local[addr]
+		r.mu.Unlock()
+		return local
+	}
+	r.mu.Unlock()
+
+	set := make(map[netip.Addr]bool, 16)
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range addrs {
+			if ipnet, ok := a.(*net.IPNet); ok {
+				if ip, ok := netip.AddrFromSlice(ipnet.IP); ok {
+					set[ip.Unmap()] = true
+				}
+			}
+		}
+	}
+	r.mu.Lock()
+	r.local, r.localAt = set, time.Now()
+	local := set[addr]
+	r.mu.Unlock()
+	return local
 }
 
 func (r *relay) clientSocket(from netip.AddrPort) (*net.UDPConn, error) {
@@ -473,8 +533,13 @@ func listenTransparentPacket(ctx context.Context, network, address string, recvO
 				serr = err
 				return
 			}
-			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
-				serr = err
+			// SO_REUSEPORT is only for the interception listeners. A reply socket binds
+			// the original destination (e.g. 8.8.8.8:53); setting REUSEPORT there would
+			// let it steal packets from another listener on the same address:port.
+			if recvOrigDst {
+				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
+					serr = err
+				}
 			}
 		}); err != nil {
 			return err
