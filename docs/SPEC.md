@@ -721,6 +721,11 @@ with FBF/VRF policy routing, or a node that is not in the return path). Componen
   client expect.
 * The relay must be running: if it dies, intercepted queries are dropped until systemd
   restarts it (`Restart=always`). The nft unit `Requires=`/`After=` the relay unit.
+* The agent reapplies this section on every poll while TProxy is enabled, even when the
+  config version did not change. `Apply` is idempotent, so a relay unit that died (or a
+  node whose units never started after a boot problem) is brought back without waiting
+  for a profile change. An agent upgrade also restarts the relay immediately, because the
+  unit runs the same `dnsjos-agent` binary that the upgrade replaces.
 
 Files owned by the agent in both modes: `/var/lib/dnsjos/dnsjos-tproxy.nft`,
 `/usr/local/lib/dnsjos/tproxy-apply.sh`, `/usr/local/lib/dnsjos/tproxy-cleanup.sh`,

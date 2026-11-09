@@ -600,7 +600,9 @@ func origDst(oob []byte) (netip.AddrPort, bool) {
 		case *unix.SockaddrInet4:
 			return netip.AddrPortFrom(netip.AddrFrom4(a.Addr), uint16(a.Port)), true
 		case *unix.SockaddrInet6:
-			return netip.AddrPortFrom(netip.AddrFrom16(a.Addr), uint16(a.Port)), true
+			// Unmap so a v4-mapped destination compares and encodes as IPv4,
+			// matching udpAddrPort and proxyHeader.
+			return netip.AddrPortFrom(netip.AddrFrom16(a.Addr).Unmap(), uint16(a.Port)), true
 		}
 	}
 	return netip.AddrPort{}, false
