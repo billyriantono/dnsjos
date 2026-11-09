@@ -728,8 +728,12 @@ with FBF/VRF policy routing, or a node that is not in the return path). Componen
   unit runs the same `dnsjos-agent` binary that the upgrade replaces.
 * Every heartbeat carries `tproxy` (`api.TProxyStatus`): mode, port, whether the nft
   table is loaded, whether the relay unit is active, whether the fwmark rule and table
-  5315 route exist, and a combined error. The node page shows these as nft/relay/policy
-  badges, so an operator can see interception health without shell access.
+  5315 route exist, the nft counter totals, and a combined error. The node page shows
+  these as nft/relay/policy badges plus a hit counter, so an operator can see both unit
+  health and whether real traffic is reaching the interception path without shell access.
+  A direct query to the interception port does not traverse the port-53 TPROXY rule and
+  therefore does not increase the counter; only traffic that arrives through the router
+  does.
 
 Files owned by the agent in both modes: `/var/lib/dnsjos/dnsjos-tproxy.nft`,
 `/usr/local/lib/dnsjos/tproxy-apply.sh`, `/usr/local/lib/dnsjos/tproxy-cleanup.sh`,
