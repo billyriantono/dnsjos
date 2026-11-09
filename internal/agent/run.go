@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -221,14 +222,31 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 			a.applyErr, a.fetchErr = "", false
 		}
 		a.mu.Unlock()
-		if needTP && cur != nil {
+		// Apply is idempotent. Run it on every unchanged-config poll while TProxy is
+		// enabled so a relay or nft unit that died (or never started after an agent
+		// upgrade or boot) is brought back without waiting for a profile change. It
+		// costs a couple of systemctl checks per poll.
+		if cur != nil && (needTP || cur.Spec.Listen.TProxy.Enabled) {
 			if err := tproxy.Apply(ctx, a.o.Root, cur.Spec, a.o.NoSystemd, a.o.Log); err != nil {
-				a.o.Log.Warn("retrying the DNS redirect rules failed", "err", err)
+				a.o.Log.Warn("applying the DNS redirect rules failed", "err", err)
+				a.mu.Lock()
+				a.tpPending = true
+				if a.applyErr == "" || strings.HasPrefix(a.applyErr, "tproxy: ") {
+					a.applyErr = "tproxy: " + err.Error()
+				}
+				a.mu.Unlock()
 			} else {
 				a.mu.Lock()
-				a.tpPending, a.applyErr = false, ""
+				a.tpPending = false
+				// Only clear an error this retry owns: a failed dnsdist apply must stay
+				// visible even though the redirect rules are fine.
+				if strings.HasPrefix(a.applyErr, "tproxy: ") {
+					a.applyErr = ""
+				}
 				a.mu.Unlock()
-				poke(a.hbNow)
+				if needTP {
+					poke(a.hbNow)
+				}
 			}
 		}
 		return
