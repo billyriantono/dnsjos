@@ -407,7 +407,10 @@ func (r *relay) expire() {
 		case <-r.done:
 			return
 		case <-t.C:
-			cutoff := time.Now().Add(-10 * time.Second)
+			// Longer than any dnsdist upstream timeout, so an answer to a slow
+			// upstream still finds its client. Memory stays trivial: ~60 bytes per
+			// entry, and 4 backends hold 262k ids.
+			cutoff := time.Now().Add(-30 * time.Second)
 			idle := time.Now().Add(-5 * time.Minute)
 			var stale []*net.UDPConn
 			r.mu.Lock()
