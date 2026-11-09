@@ -418,7 +418,11 @@ func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
 	hb.DnsdistCandidate, hb.DnsdistAvailable, hb.DnsdistRepoSeries = a.inv.Candidate, slices.Clone(a.inv.Available), a.inv.Series
 	hb.InventoryAt, hb.LastUpgrade, hb.UpgradeInProgress = a.inv.At, a.lastUp, a.upgrading
 	hb.AllowlistVersion = a.allowHave
+	spec := a.cfg
 	a.mu.Unlock()
+	if spec != nil {
+		hb.TProxy = tproxy.Status(ctx, a.o.Root, spec.Spec, a.o.NoSystemd)
+	}
 	return hb
 }
 

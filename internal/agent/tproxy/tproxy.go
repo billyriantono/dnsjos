@@ -1,8 +1,8 @@
-// Package tproxy installs the node-level DNS redirect that feeds dnsdist when
-// ConfigSpec.Listen.TProxy is enabled (SPEC §6.14). dnsdist cannot open IP_TRANSPARENT
-// sockets, so the agent uses an nftables REDIRECT into a dedicated dnsdist listener:
-// redirected packets keep their client source address, and dnsdist's ACL, abuse limits
-// and analytics work exactly as for directly connected clients.
+// Package tproxy installs node-level DNS interception when ConfigSpec.Listen.TProxy is
+// enabled (SPEC §6.14). In redirect mode nftables DNATs port 53 into a dedicated dnsdist
+// listener. In tproxy mode an nftables TPROXY rule hands packets to a transparent relay,
+// which forwards them to loopback dnsdist with the PROXY protocol and answers from the
+// original destination address.
 package tproxy
 
 import (
@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 )
@@ -460,6 +461,56 @@ func active(ctx context.Context) bool {
 
 func activeUnit(ctx context.Context, name string) bool {
 	return exec.CommandContext(ctx, "systemctl", "is-active", "--quiet", name).Run() == nil
+}
+
+// Status reports what the node is actually running. It is deliberately cheap (three
+// exec calls) because every heartbeat includes it.
+func Status(ctx context.Context, root string, spec api.ConfigSpec, noSystemd bool) *api.TProxyStatus {
+	tp := spec.Listen.TProxy
+	if !tp.Enabled {
+		return nil
+	}
+	st := &api.TProxyStatus{Enabled: true, Mode: tp.EffectiveMode(), Port: tp.EffectivePort()}
+	if noSystemd {
+		_, err := os.Stat(rootPath(root, NFTFile))
+		st.NFTLoaded = err == nil
+		return st
+	}
+	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+	st.NFTLoaded = exec.CommandContext(cctx, "nft", "list", "table", "inet", tableName).Run() == nil
+	if !st.NFTLoaded {
+		st.Error = "nftables table inet " + tableName + " is missing"
+	}
+	if tp.IsTProxy() {
+		st.RelayActive = activeUnit(cctx, RelayUnitName)
+		st.PolicyRouting = policyRouting(cctx)
+		if !st.RelayActive {
+			addStatusError(st, "the transparent relay is not active")
+		}
+		if !st.PolicyRouting {
+			addStatusError(st, "fwmark policy routing to table "+tproxyTable+" is missing")
+		}
+	}
+	return st
+}
+
+func addStatusError(st *api.TProxyStatus, msg string) {
+	if st.Error != "" {
+		st.Error += "; "
+	}
+	st.Error += msg
+}
+
+// policyRouting checks both halves of the TPROXY policy route: the fwmark rule and a
+// non-empty local route in table 5315.
+func policyRouting(ctx context.Context) bool {
+	out, err := exec.CommandContext(ctx, "ip", "rule", "show").Output()
+	if err != nil || !strings.Contains(string(out), "fwmark "+tproxyMark) {
+		return false
+	}
+	out, err = exec.CommandContext(ctx, "ip", "route", "show", "table", tproxyTable).Output()
+	return err == nil && strings.TrimSpace(string(out)) != ""
 }
 
 // RestartRelay restarts the transparent relay when it is active. An agent upgrade

@@ -314,6 +314,18 @@ export interface Heartbeat {
   inventory_at: string | null
   last_upgrade: UpgradeResult | null
   upgrade_in_progress: boolean
+  /** Live interception state; absent when TProxy is disabled or the agent is old. */
+  tproxy?: TProxyStatus | null
+}
+
+export interface TProxyStatus {
+  enabled: boolean
+  mode: TProxyMode
+  port: number
+  nft_loaded: boolean
+  relay_active: boolean
+  policy_routing: boolean
+  error: string
 }
 
 export type UpgradeKind = 'dnsdist' | 'agent'

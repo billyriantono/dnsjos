@@ -123,6 +123,23 @@ export default function NodeDetailPage() {
           </Badge>
         ))}
       </div>
+      {hb?.tproxy && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">TProxy</span>
+          <Badge variant="secondary" className="font-normal">
+            {hb.tproxy.mode}
+          </Badge>
+          <span>port {hb.tproxy.port}</span>
+          <SyncBadge ok={hb.tproxy.nft_loaded} label="nft" />
+          {hb.tproxy.mode === 'tproxy' && (
+            <>
+              <SyncBadge ok={hb.tproxy.relay_active} label="relay" />
+              <SyncBadge ok={hb.tproxy.policy_routing} label="policy" />
+            </>
+          )}
+          {hb.tproxy.error && <span className="text-destructive">{hb.tproxy.error}</span>}
+        </div>
+      )}
 
       <Tabs defaultValue="overview">
         <TabsList className="max-w-full justify-start overflow-x-auto">

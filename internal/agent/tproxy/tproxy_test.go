@@ -288,6 +288,29 @@ func TestApplyTestModeTProxyFiles(t *testing.T) {
 	}
 }
 
+func TestStatus(t *testing.T) {
+	ctx := context.Background()
+	if st := Status(ctx, t.TempDir(), api.DefaultConfigSpec(), true); st != nil {
+		t.Fatalf("disabled tproxy returned %+v", st)
+	}
+	root := t.TempDir()
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := Apply(ctx, root, tproxySpec(), true, log); err != nil {
+		t.Fatal(err)
+	}
+	st := Status(ctx, root, tproxySpec(), true)
+	if st == nil || !st.Enabled || st.Mode != api.TProxyModeTProxy || st.Port != 5300 || !st.NFTLoaded {
+		t.Fatalf("status = %+v", st)
+	}
+	// A missing rendered table is reported, not silently healthy.
+	if err := os.Remove(filepath.Join(root, NFTFile)); err != nil {
+		t.Fatal(err)
+	}
+	if st := Status(ctx, root, tproxySpec(), true); st == nil || st.NFTLoaded {
+		t.Fatalf("missing table status = %+v", st)
+	}
+}
+
 func TestProxyHeader(t *testing.T) {
 	v4src := netip.MustParseAddrPort("192.0.2.10:12345")
 	v4dst := netip.MustParseAddrPort("8.8.8.8:53")

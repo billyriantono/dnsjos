@@ -726,6 +726,10 @@ with FBF/VRF policy routing, or a node that is not in the return path). Componen
   node whose units never started after a boot problem) is brought back without waiting
   for a profile change. An agent upgrade also restarts the relay immediately, because the
   unit runs the same `dnsjos-agent` binary that the upgrade replaces.
+* Every heartbeat carries `tproxy` (`api.TProxyStatus`): mode, port, whether the nft
+  table is loaded, whether the relay unit is active, whether the fwmark rule and table
+  5315 route exist, and a combined error. The node page shows these as nft/relay/policy
+  badges, so an operator can see interception health without shell access.
 
 Files owned by the agent in both modes: `/var/lib/dnsjos/dnsjos-tproxy.nft`,
 `/usr/local/lib/dnsjos/tproxy-apply.sh`, `/usr/local/lib/dnsjos/tproxy-cleanup.sh`,
