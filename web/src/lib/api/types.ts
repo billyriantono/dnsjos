@@ -8,7 +8,7 @@ export interface Do53 {
   addresses: string[]
   reuse_port_listeners: number
 }
-/** §6.13: nftables REDIRECT of passing DNS queries into dnsdist (gateway/router nodes). */
+/** §6.14: transparent interception of passing DNS queries (gateway/router nodes). */
 export type TProxyMode = 'redirect' | 'tproxy'
 export const TPROXY_MODES: TProxyMode[] = ['redirect', 'tproxy']
 export interface TProxy {
