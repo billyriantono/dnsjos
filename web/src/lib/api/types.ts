@@ -325,6 +325,8 @@ export interface TProxyStatus {
   nft_loaded: boolean
   relay_active: boolean
   policy_routing: boolean
+  intercepted_packets: number
+  intercepted_bytes: number
   error: string
 }
 

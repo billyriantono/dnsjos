@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -145,10 +146,10 @@ func Render(spec api.ConfigSpec) (Files, error) {
 		b.WriteString("\t\tiifname != @ifaces return\n")
 	}
 	if tproxy {
-		fmt.Fprintf(&b, "\t\tmeta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 tproxy ip to :%d meta mark set %s accept\n", port, tproxyMark)
-		fmt.Fprintf(&b, "\t\tmeta nfproto ipv6 meta l4proto { tcp, udp } th dport 53 tproxy ip6 to :%d meta mark set %s accept\n", port, tproxyMark)
+		fmt.Fprintf(&b, "\t\tmeta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 counter tproxy ip to :%d meta mark set %s accept\n", port, tproxyMark)
+		fmt.Fprintf(&b, "\t\tmeta nfproto ipv6 meta l4proto { tcp, udp } th dport 53 counter tproxy ip6 to :%d meta mark set %s accept\n", port, tproxyMark)
 	} else {
-		fmt.Fprintf(&b, "\t\tmeta l4proto { tcp, udp } th dport 53 redirect to :%d\n", port)
+		fmt.Fprintf(&b, "\t\tmeta l4proto { tcp, udp } th dport 53 counter redirect to :%d\n", port)
 	}
 	b.WriteString("\t}\n}\n")
 
@@ -478,7 +479,11 @@ func Status(ctx context.Context, root string, spec api.ConfigSpec, noSystemd boo
 	}
 	cctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
-	st.NFTLoaded = exec.CommandContext(cctx, "nft", "list", "table", "inet", tableName).Run() == nil
+	out, err := exec.CommandContext(cctx, "nft", "list", "table", "inet", tableName).Output()
+	st.NFTLoaded = err == nil
+	if st.NFTLoaded {
+		st.InterceptedPackets, st.InterceptedBytes = parseCounters(string(out))
+	}
 	if !st.NFTLoaded {
 		st.Error = "nftables table inet " + tableName + " is missing"
 	}
@@ -493,6 +498,44 @@ func Status(ctx context.Context, root string, spec api.ConfigSpec, noSystemd boo
 		}
 	}
 	return st
+}
+
+// parseCounters sums the "counter packets N bytes M" clauses nft prints for the rules.
+func parseCounters(out string) (packets, bytes uint64) {
+	for {
+		i := strings.Index(out, "counter packets ")
+		if i < 0 {
+			return packets, bytes
+		}
+		out = out[i+len("counter packets "):]
+		n, rest, ok := leadingUint(out)
+		if !ok {
+			return packets, bytes
+		}
+		out = rest
+		if !strings.HasPrefix(out, " bytes ") {
+			continue
+		}
+		b, rest, ok := leadingUint(out[len(" bytes "):])
+		if !ok {
+			return packets, bytes
+		}
+		out = rest
+		packets += n
+		bytes += b
+	}
+}
+
+func leadingUint(s string) (uint64, string, bool) {
+	i := 0
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return 0, s, false
+	}
+	n, err := strconv.ParseUint(s[:i], 10, 64)
+	return n, s[i:], err == nil
 }
 
 func addStatusError(st *api.TProxyStatus, msg string) {

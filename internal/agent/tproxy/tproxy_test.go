@@ -98,7 +98,7 @@ func TestRenderRules(t *testing.T) {
 		"ip saddr != @source4 return",
 		"ip6 saddr != @source6 return",
 		"iifname != @ifaces return",
-		"meta l4proto { tcp, udp } th dport 53 redirect to :5300",
+		"meta l4proto { tcp, udp } th dport 53 counter redirect to :5300",
 		"10.0.0.0/8",
 		"2001:db8::/32",
 		"4.4.4.4",
@@ -308,6 +308,18 @@ func TestStatus(t *testing.T) {
 	}
 	if st := Status(ctx, root, tproxySpec(), true); st == nil || st.NFTLoaded {
 		t.Fatalf("missing table status = %+v", st)
+	}
+}
+
+func TestParseCounters(t *testing.T) {
+	in := `meta nfproto ipv4 meta l4proto { tcp, udp } th dport 53 counter packets 12 bytes 3456 tproxy ip to :5300
+meta nfproto ipv6 meta l4proto { tcp, udp } th dport 53 counter packets 3 bytes 200 tproxy ip6 to :5300`
+	p, b := parseCounters(in)
+	if p != 15 || b != 3656 {
+		t.Fatalf("counters = %d/%d, want 15/3656", p, b)
+	}
+	if p, b := parseCounters("no counters here"); p != 0 || b != 0 {
+		t.Fatalf("empty = %d/%d", p, b)
 	}
 }
 

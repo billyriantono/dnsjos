@@ -22,7 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ApiError, useNode, useNodeLive } from '@/lib/api/client'
-import { fmtMs, fmtPercent, fmtQps, shortSha } from '@/lib/format'
+import { fmtBytes, fmtMs, fmtPercent, fmtQps, shortSha } from '@/lib/format'
 
 export default function NodeDetailPage() {
   const { id = '' } = useParams()
@@ -137,6 +137,9 @@ export default function NodeDetailPage() {
               <SyncBadge ok={hb.tproxy.policy_routing} label="policy" />
             </>
           )}
+          <span title="nft rule counters since the last rules reload">
+            {hb.tproxy.intercepted_packets.toLocaleString()} hits · {fmtBytes(hb.tproxy.intercepted_bytes)}
+          </span>
           {hb.tproxy.error && <span className="text-destructive">{hb.tproxy.error}</span>}
         </div>
       )}

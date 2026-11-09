@@ -97,7 +97,12 @@ type TProxyStatus struct {
 	NFTLoaded     bool   `json:"nft_loaded"`
 	RelayActive   bool   `json:"relay_active"`   // tproxy mode only
 	PolicyRouting bool   `json:"policy_routing"` // tproxy mode only: fwmark rule + table 5315
-	Error         string `json:"error"`
+	// InterceptedPackets/Bytes are the nft rule counters since the table was last
+	// reloaded. Watching them increase is how an operator confirms real traffic is being
+	// intercepted, not just that the units are active.
+	InterceptedPackets uint64 `json:"intercepted_packets"`
+	InterceptedBytes   uint64 `json:"intercepted_bytes"`
+	Error              string `json:"error"`
 }
 
 // UpgradeResult is the outcome of the node's most recent upgrade_dnsdist / upgrade_agent.
