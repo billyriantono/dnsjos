@@ -196,8 +196,29 @@ func TestRenderTProxyKeepsRPFilterByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(f.Script), "rp_filter") {
+	// The restore block is always present (a previous apply may have disabled it), but
+	// the option is off, so nothing may write 0.
+	if strings.Contains(string(f.Script), "echo 0 > \"$f\"") {
 		t.Errorf("rp_filter must be opt-in:\n%s", f.Script)
+	}
+	if !strings.Contains(string(f.Script), "RP_STATE=") {
+		t.Errorf("the restore block must still run:\n%s", f.Script)
+	}
+}
+
+// TestRenderRedirectRestoresRPFilter: switching back to redirect after a tproxy run with
+// disable_rp_filter must undo the sysctl, not leave every interface at 0.
+func TestRenderRedirectRestoresRPFilter(t *testing.T) {
+	f, err := Render(spec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(f.Script), "echo 0 > \"$f\"") {
+		t.Errorf("redirect mode must not disable rp_filter:\n%s", f.Script)
+	}
+	if !strings.Contains(string(f.Script), "RP_STATE=") ||
+		!strings.Contains(string(f.Cleanup), "RP_STATE=") {
+		t.Errorf("redirect scripts must restore a previous rp_filter change:\n%s\n%s", f.Script, f.Cleanup)
 	}
 }
 
