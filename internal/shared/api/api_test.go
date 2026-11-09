@@ -25,6 +25,26 @@ func TestTProxyCanBeTheOnlyListener(t *testing.T) {
 	}
 }
 
+// TestTProxyModeCanBeTheOnlyListener: real TPROXY needs no public dnsdist listener; the
+// relay owns the port and dnsdist moves to loopback port+1.
+func TestTProxyModeCanBeTheOnlyListener(t *testing.T) {
+	s := DefaultConfigSpec()
+	s.Listen.Do53.Enabled = false
+	s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 5300,
+		Sources: []string{"0.0.0.0/0", "::/0"}, DisableRPFilter: true}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Listen.TProxy.IsTProxy() || s.Listen.TProxy.EffectiveMode() != TProxyModeTProxy {
+		t.Fatalf("mode = %q", s.Listen.TProxy.EffectiveMode())
+	}
+	// An empty mode is the documented redirect default.
+	s.Listen.TProxy.Mode = ""
+	if s.Listen.TProxy.IsTProxy() || s.Listen.TProxy.EffectiveMode() != TProxyModeRedirect {
+		t.Fatalf("empty mode = %q, want redirect", s.Listen.TProxy.EffectiveMode())
+	}
+}
+
 // TestIPAliasValid checks a well-formed ip-alias spec (IPv4 and IPv6 rules) validates.
 func TestIPAliasValid(t *testing.T) {
 	s := DefaultConfigSpec()
@@ -134,6 +154,20 @@ func TestValidateRejects(t *testing.T) {
 		},
 		"tproxy webserver collision": func(s *ConfigSpec) {
 			s.Listen.TProxy = TProxy{Enabled: true, Port: 8083}
+		},
+		"tproxy bad mode": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: "magic"}
+		},
+		"tproxy mode no room": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 65535}
+		},
+		"tproxy mode loopback collision": func(s *ConfigSpec) {
+			// The loopback dnsdist listener on 5199 collides with the dnsdist console.
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 5198}
+		},
+		"tproxy mode public collision": func(s *ConfigSpec) {
+			s.Listen.Do53.Addresses = []string{"0.0.0.0:5300"}
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 5299}
 		},
 	}
 	for name, mutate := range cases {

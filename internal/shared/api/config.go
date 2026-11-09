@@ -46,6 +46,18 @@ type Do53 struct {
 // rules when TProxy.Port is 0.
 const TProxyDefaultPort = 5300
 
+// TProxy modes. Redirect is the kernel-DNAT mode that works with a normal dnsdist
+// listener. TProxy is real IP_TRANSPARENT interception through the agent's transparent
+// relay, required when the packet must keep its original destination (core routers with
+// policy routing / FBF).
+const (
+	TProxyModeRedirect = "redirect"
+	TProxyModeTProxy   = "tproxy"
+)
+
+// TProxyModes are the accepted modes of TProxy.Mode.
+var TProxyModes = []string{TProxyModeRedirect, TProxyModeTProxy}
+
 // TProxy makes the node intercept DNS queries that pass through it (a gateway/router)
 // and send them to dnsdist without touching client settings. dnsdist has no
 // IP_TRANSPARENT/TPROXY sockets and cannot bind a non-local destination, so the agent
@@ -54,6 +66,12 @@ const TProxyDefaultPort = 5300
 // It does not rewrite answers or touch traffic that is not DNS on port 53.
 type TProxy struct {
 	Enabled bool `json:"enabled"`
+	// Mode selects the interception mechanism:
+	//   "" / "redirect" (default): nftables REDIRECT into a dnsdist listener on Port.
+	//   "tproxy": real nftables TPROXY (IP_TRANSPARENT) into the agent's transparent relay
+	//   on Port; dnsdist listens on 127.0.0.1:Port+1 with PROXY protocol. Use this when
+	//   the traffic is policy-routed / FBF and must keep its original destination.
+	Mode string `json:"mode"`
 	// Port is the dnsdist listener for redirected queries. 0 = 5300. It must not collide
 	// with another dnsdist listener (especially port 53).
 	Port int `json:"port"`
@@ -67,6 +85,10 @@ type TProxy struct {
 	// Interfaces limits interception to traffic arriving on these interfaces
 	// (empty = every interface).
 	Interfaces []string `json:"interfaces"`
+	// DisableRPFilter turns off strict reverse-path filtering on the interception
+	// interfaces. FBF / policy-routed traffic usually needs this; it is opt-in because
+	// it weakens uRPF on the node.
+	DisableRPFilter bool `json:"disable_rp_filter"`
 }
 
 // EffectivePort is TProxy.Port with the default applied.
@@ -76,6 +98,17 @@ func (t TProxy) EffectivePort() int {
 	}
 	return t.Port
 }
+
+// EffectiveMode is TProxy.Mode with the redirect default applied.
+func (t TProxy) EffectiveMode() string {
+	if t.Mode == "" {
+		return TProxyModeRedirect
+	}
+	return t.Mode
+}
+
+// IsTProxy reports whether the real IP_TRANSPARENT relay mode is selected.
+func (t TProxy) IsTProxy() bool { return t.EffectiveMode() == TProxyModeTProxy }
 
 type DoH struct {
 	Enabled   bool     `json:"enabled"`
@@ -333,7 +366,7 @@ func DefaultConfigSpec() ConfigSpec {
 			DoH:    DoH{Addresses: []string{"0.0.0.0:443", "[::]:443"}, Path: "/dns-query"},
 			DoT:    DoT{Addresses: []string{"0.0.0.0:853", "[::]:853"}},
 			TLS:    TLS{CertFile: "/etc/dnsdist/tls/cert.pem", KeyFile: "/etc/dnsdist/tls/key.pem"},
-			TProxy: TProxy{Port: TProxyDefaultPort},
+			TProxy: TProxy{Mode: TProxyModeRedirect, Port: TProxyDefaultPort},
 		},
 		// Private, CGNAT, loopback and link-local space only. Add your own public customer
 		// prefixes in the panel (a profile or node override) — they are deployment data.

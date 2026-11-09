@@ -112,6 +112,14 @@ func TestGolden(t *testing.T) {
 			s.Listen.Do53.Enabled = false
 			s.Listen.TProxy = api.TProxy{Enabled: true}
 		},
+		"tproxy_mode": func(s *api.ConfigSpec) {
+			s.Listen.TProxy = api.TProxy{
+				Enabled: true,
+				Mode:    api.TProxyModeTProxy,
+				Port:    5300,
+				Sources: []string{"0.0.0.0/0", "::/0"},
+			}
+		},
 	}
 	for name, mut := range cases {
 		t.Run(name, func(t *testing.T) {

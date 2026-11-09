@@ -110,6 +110,8 @@ command -v sha256sum >/dev/null 2>&1 || need_pkgs="$need_pkgs coreutils"
 command -v gpg >/dev/null 2>&1 || need_pkgs="$need_pkgs gnupg"
 # TProxy (DNS redirect) rules are installed with nft.
 command -v nft >/dev/null 2>&1 || need_pkgs="$need_pkgs nftables"
+# TProxy mode also installs fwmark policy routing with ip rule/ip route.
+command -v ip >/dev/null 2>&1 || need_pkgs="$need_pkgs iproute2"
 if [ -n "$need_pkgs" ]; then
 	say "installing prerequisites:$need_pkgs"
 	apt-get update -q

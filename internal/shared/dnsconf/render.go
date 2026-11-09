@@ -112,14 +112,29 @@ func Render(spec api.ConfigSpec, rt api.NodeRuntime) (map[string][]byte, error) 
 		}
 	}
 	if l.TProxy.Enabled {
-		p := l.TProxy.EffectivePort()
-		for _, a := range []string{fmt.Sprintf("0.0.0.0:%d", p), fmt.Sprintf("[::]:%d", p)} {
+		if l.TProxy.IsTProxy() {
+			// The agent's transparent relay owns the public TPROXY port and forwards to
+			// dnsdist over loopback with a PROXY v2 header, so dnsdist still sees the
+			// real client address. Port+1 keeps the forwarding listener private.
+			w("setProxyProtocolACL({\"127.0.0.1/32\", \"::1/128\"})\n")
+			w("setProxyProtocolApplyACLToProxiedClients(true)\n")
+			p := l.TProxy.EffectivePort() + 1
 			fn := "addLocal"
 			if first {
 				// No Do53 address used setLocal: replace dnsdist's default 127.0.0.1:53.
 				fn, first = "setLocal", false
 			}
-			w("%s(%s, {reusePort = true})\n", fn, luaString(a))
+			w("%s(\"127.0.0.1:%d\", {enableProxyProtocol = true, reusePort = true})\n", fn, p)
+		} else {
+			p := l.TProxy.EffectivePort()
+			for _, a := range []string{fmt.Sprintf("0.0.0.0:%d", p), fmt.Sprintf("[::]:%d", p)} {
+				fn := "addLocal"
+				if first {
+					// No Do53 address used setLocal: replace dnsdist's default 127.0.0.1:53.
+					fn, first = "setLocal", false
+				}
+				w("%s(%s, {reusePort = true})\n", fn, luaString(a))
+			}
 		}
 	}
 	cert, key := luaString(l.TLS.CertFile), luaString(l.TLS.KeyFile)

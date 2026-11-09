@@ -642,35 +642,90 @@ only rewrites):
 
 ### 6.14 TProxy (transparent DNS redirect)
 
-For a node that is also a gateway/router: intercept DNS queries passing through it and
-answer them with dnsdist, without changing client settings. `listen.tproxy` (`api.TProxy`):
+For a node that is also a gateway or core router: intercept DNS queries passing through
+it and answer them with dnsdist, without changing client settings. `listen.tproxy`
+(`api.TProxy`) has two modes, selected by `mode`.
 
-* `enabled` — the agent installs an nftables table `inet dnsjos_tproxy` with a `nat`
-  `prerouting` chain that redirects UDP and TCP port 53 to `port` (0 = 5300). The
-  dnsdist config gets `addLocal("0.0.0.0:<port>")` and `addLocal("[::]:<port>")`, and the
-  port is validated against every other dnsdist listener and its webserver.
-* **REDIRECT, not IP_TRANSPARENT.** dnsdist has no `IP_TRANSPARENT`/TPROXY socket option
-  and cannot accept packets delivered to a non-local destination. The agent therefore uses
-  netfilter `redirect`: the kernel performs the destination translation, preserves the
-  client source address (so ACL, abuse limits, blocklists and analytics behave exactly as
-  for direct clients), and dnsdist answers from its own local address. No sidecar process
-  sits in the query path, so a lost agent does not blackhole DNS.
-* `sources` limits interception to client CIDRs (empty = every client) and is appended to
-  the emitted `setACL`; a redirected client the ACL refuses would get no answer.
-* `exclude_dst` are destination CIDRs never intercepted. Upstreams are not excluded: the
-  chain only runs in `prerouting`, so dnsdist's own upstream queries (locally generated,
-  `output`/`postrouting`) never reach it. Excluding upstream addresses would let clients
-  bypass the redirect by querying them directly.
+Common fields:
+
+* `enabled` — installs the rules. When disabled the units, scripts, nft table and policy
+  routing are removed.
+* `port` — interception port (0 = 5300). Validated against every other dnsdist listener,
+  the dnsdist console, the dnstap listener, the analytics stream and the panel webserver.
+* `sources` limits interception to client CIDRs (empty = every client; on a router use
+  `0.0.0.0/0` plus `::/0` to cover both families). The list is appended to the emitted
+  `setACL`: an intercepted client the ACL refuses would get no answer at all.
+* `exclude_dst` are destination CIDRs never intercepted. Upstreams are not excluded: both
+  chains only run in `prerouting`, so dnsdist's own upstream queries (locally generated,
+  `output`/`postrouting`) never reach them. Excluding upstream addresses would let clients
+  bypass interception by querying them directly.
 * `interfaces` limits interception to traffic arriving on those interfaces (empty = all).
-* The agent owns `/var/lib/dnsjos/dnsjos-tproxy.nft`,
-  `/usr/local/lib/dnsjos/tproxy-apply.sh` and the oneshot unit
-  `dnsjos-tproxy.service` (enabled at boot). When the section is disabled the unit and the
-  nft table are removed. `nftables` is installed by `install.sh`.
-* The redirect port is a normal local UDP/TCP port after translation. If the node has an
-  INPUT firewall that only allows port 53, allow the redirect port too (or dnsdist never
-  sees the intercepted queries).
-* The rule is evaluated in `prerouting`, i.e. for forwarded traffic. Locally generated
-  queries (the node itself) are not redirected; use the node's normal resolver for those.
+* `disable_rp_filter` (TProxy mode) sets `/proc/sys/net/ipv4/conf/*/rp_filter` (or only the
+  configured interfaces) to `0` and records the previous values in
+  `/var/lib/dnsjos/dnsjos-tproxy-rpfilter.state`, so removing the rules restores them.
+  FBF/VRF traffic commonly fails the reverse-path check. It is opt-in because it weakens
+  uRPF on the node.
+
+Both modes run in `prerouting`, i.e. for forwarded traffic only. Locally generated queries
+(the node itself) are not intercepted; use the node's normal resolver for those. If the
+node has an INPUT firewall that only allows port 53, also allow the interception port and,
+in TProxy mode, the loopback dnsdist port `port+1`.
+
+#### `mode = "redirect"` (default)
+
+* The agent installs `table inet dnsjos_tproxy` with a `nat` `prerouting` chain that
+  redirects UDP and TCP port 53 to `port`. dnsdist gets `addLocal("0.0.0.0:<port>")` and
+  `addLocal("[::]:<port>")`.
+* **REDIRECT, not IP_TRANSPARENT.** dnsdist has no `IP_TRANSPARENT`/TPROXY socket option
+  and cannot accept packets addressed to a non-local destination, so the kernel performs
+  the destination translation. The client source address is preserved (so ACL, abuse
+  limits, blocklists and analytics behave exactly as for direct clients) and dnsdist
+  answers from its own local address. No sidecar process sits in the query path, so a lost
+  agent cannot blackhole DNS.
+* Sufficient when clients reach the node directly (the node is their gateway) or when the
+  upstream router only forwards queries to this node.
+* Not sufficient when an upstream core router uses **FBF / policy routing** for the
+  reply: the translated destination no longer matches the address the client used, so
+  the core router's policy rule and reverse-path check drop or misroute the answer.
+
+#### `mode = "tproxy"` (real IP_TRANSPARENT)
+
+Used when the answer must appear to come from the address the client queried (core router
+with FBF/VRF policy routing, or a node that is not in the return path). Components:
+
+* The agent relay (`dnsjos-agent tproxy-relay --port <port> --dnsdist 127.0.0.1:<port+1>`,
+  unit `dnsjos-tproxy-relay.service`) opens `IP_TRANSPARENT` UDP4/6 and TCP4/6 sockets on
+  `<port>`, enables `IP_RECVORIGDSTADDR`/`IPV6_RECVORIGDSTADDR`, and so receives each
+  packet together with the address the client originally used.
+* nftables `table inet dnsjos_tproxy` uses a `filter prerouting priority mangle` chain:
+  `iifname "lo" return`, `fib daddr type local return` (queries to the node's own
+  addresses stay with the normal port-53 listener), the source/exclude/interface checks,
+  then `tproxy ip to :<port> meta mark set 0x5315 accept` (and the IPv6 equivalent).
+* The mark drives policy routing installed by the apply script: `ip rule add fwmark
+  0x5315/0xffffffff lookup 5315 priority 100` and `ip route add local 0.0.0.0/0 dev lo
+  table 5315` (plus the `ip -6` equivalents). Priority 100 keeps it ahead of a typical FBF
+  profile while staying clear of the `local` table; table 5315 is private to DnsJos and
+  flushed on removal.
+* The relay forwards each query to the loopback dnsdist listener with a **PROXY protocol
+  v2** header carrying the client and original destination address. The DNS transaction ID
+  is rewritten to a relay-unique value and restored on the answer, so concurrent clients
+  reusing IDs cannot be confused. UDP pending state expires after 30s.
+* dnsdist gets `setProxyProtocolACL({"127.0.0.1/32","::1/128"})`,
+  `setProxyProtocolApplyACLToProxiedClients(true)` and
+  `addLocal("127.0.0.1:<port+1>", {enableProxyProtocol = true, reusePort = true})`. It
+  therefore applies the real client address to the ACL, blocklists, abuse limits, ECS and
+  analytics. The loopback listener is not reachable from outside.
+* Answers leave the relay from the original destination address and port (transparent
+  client socket bound to that address), which is what the core router's FBF rule and
+  client expect.
+* The relay must be running: if it dies, intercepted queries are dropped until systemd
+  restarts it (`Restart=always`). The nft unit `Requires=`/`After=` the relay unit.
+
+Files owned by the agent in both modes: `/var/lib/dnsjos/dnsjos-tproxy.nft`,
+`/usr/local/lib/dnsjos/tproxy-apply.sh`, `/usr/local/lib/dnsjos/tproxy-cleanup.sh`,
+`/etc/systemd/system/dnsjos-tproxy.service` and, in TProxy mode,
+`/etc/systemd/system/dnsjos-tproxy-relay.service`. `install.sh` installs `nftables` and
+`iproute2`; the kernel needs `CONFIG_NFT_TPROXY` (present in Debian/Ubuntu stock kernels).
 
 ## 7. Blocklist builder (`internal/panel/blocklist`)
 

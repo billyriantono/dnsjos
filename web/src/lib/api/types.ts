@@ -9,8 +9,12 @@ export interface Do53 {
   reuse_port_listeners: number
 }
 /** §6.13: nftables REDIRECT of passing DNS queries into dnsdist (gateway/router nodes). */
+export type TProxyMode = 'redirect' | 'tproxy'
+export const TPROXY_MODES: TProxyMode[] = ['redirect', 'tproxy']
 export interface TProxy {
   enabled: boolean
+  /** redirect = nftables REDIRECT into dnsdist; tproxy = IP_TRANSPARENT relay for FBF routers. */
+  mode: TProxyMode
   /** dnsdist listener for redirected queries; 0 = 5300. Must not collide with another listener. */
   port: number
   /** Client CIDRs to intercept; empty = every client. Added to the dnsdist ACL automatically. */
@@ -19,6 +23,8 @@ export interface TProxy {
   exclude_dst: string[]
   /** Ingress interfaces to intercept; empty = every interface. */
   interfaces: string[]
+  /** Turn off strict rp_filter on the interception interfaces (usually needed for FBF). */
+  disable_rp_filter: boolean
 }
 export interface DoH {
   enabled: boolean
