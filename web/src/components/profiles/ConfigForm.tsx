@@ -195,8 +195,8 @@ export function ConfigForm({
           onEnabledChange={(enabled) => part('blocking', { enabled })}
         >
           <Grid cols={2}>
-            <TextField label="Blockpage IPv4 (A)" path="blocking.blockpage_ipv4" value={b.blockpage_ipv4} onChange={(blockpage_ipv4) => part('blocking', { blockpage_ipv4 })} placeholder="192.0.2.10" />
-            <TextField label="Blockpage IPv6 (AAAA)" path="blocking.blockpage_ipv6" value={b.blockpage_ipv6} onChange={(blockpage_ipv6) => part('blocking', { blockpage_ipv6 })} />
+            <TextField label="Blockpage IPv4 (A)" path="blocking.blockpage_ipv4" value={b.blockpage_ipv4} onChange={(blockpage_ipv4) => part('blocking', { blockpage_ipv4 })} placeholder="192.0.2.10, 192.0.2.11" help="Comma-separated. All are answered (fallback); first is the primary." />
+            <TextField label="Blockpage IPv6 (AAAA)" path="blocking.blockpage_ipv6" value={b.blockpage_ipv6} onChange={(blockpage_ipv6) => part('blocking', { blockpage_ipv6 })} placeholder="2001:db8::10, 2001:db8::11" help="Comma-separated. All are answered (fallback); first is the primary." />
           </Grid>
           <TextField label="TXT answer" path="blocking.txt" value={b.txt} onChange={(txt) => part('blocking', { txt })} mono={false} help={`${b.txt.length}/255 characters. Returned for TXT lookups of blocked names.`} />
           <Grid cols={2}>

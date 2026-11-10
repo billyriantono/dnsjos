@@ -126,11 +126,32 @@ func (s ConfigSpec) Validate() error {
 	between("cache.stale_ttl", c.StaleTTL, 0, 604800)
 
 	b := s.Blocking
-	if a, err := netip.ParseAddr(b.BlockpageIPv4); b.Enabled && (err != nil || !a.Is4()) {
-		bad("blocking.blockpage_ipv4", "%q is not an IPv4 address", b.BlockpageIPv4)
-	}
-	if a, err := netip.ParseAddr(b.BlockpageIPv6); b.Enabled && (err != nil || !a.Is6() || a.Is4In6()) {
-		bad("blocking.blockpage_ipv6", "%q is not an IPv6 address", b.BlockpageIPv6)
+	if b.Enabled {
+		split := func(s string) []string {
+			return strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' })
+		}
+		for _, c := range []struct {
+			field, list, family string
+			ok                  func(netip.Addr) bool
+		}{
+			{"blocking.blockpage_ipv4", b.BlockpageIPv4, "IPv4", netip.Addr.Is4},
+			{"blocking.blockpage_ipv6", b.BlockpageIPv6, "IPv6", func(a netip.Addr) bool { return a.Is6() && !a.Is4In6() }},
+		} {
+			addrs := split(c.list)
+			switch {
+			case len(addrs) == 0:
+				// The renderer needs at least one address per family when blocking is on.
+				bad(c.field, "%q is not an %s address", c.list, c.family)
+			case len(addrs) > 8:
+				bad(c.field, "max 8 addresses, comma-separated")
+			}
+			for _, f := range addrs {
+				if a, err := netip.ParseAddr(f); err != nil || a.Zone() != "" || !c.ok(a) {
+					bad(c.field, "%q is not an %s address", f, c.family)
+					break
+				}
+			}
+		}
 	}
 	if len(b.TXT) > 255 {
 		bad("blocking.txt", "max 255 characters")

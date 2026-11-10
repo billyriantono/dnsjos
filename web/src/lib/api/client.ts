@@ -49,6 +49,9 @@ import type {
   Profile,
   ProfileRequest,
   RenderedConfig,
+  RPZUpstream,
+  RPZUpstreamCreate,
+  RPZUpstreamPatch,
   Session,
   Settings,
   UpgradeAction,
@@ -219,6 +222,7 @@ export const api = {
     /** profileId omitted = every scope; '' = global; otherwise that config profile. */
     sources: (profileId?: string) =>
       get<List<BlocklistSource>>(`${V1}/blocklist/sources${profileScope(profileId)}`),
+    source: (id: string) => get<BlocklistSource>(`${V1}/blocklist/sources/${id}`),
     createSource: (s: BlocklistSourceCreate) => post<BlocklistSource>(`${V1}/blocklist/sources`, s),
     updateSource: (id: string, s: BlocklistSourcePatch) => patch<BlocklistSource>(`${V1}/blocklist/sources/${id}`, s),
     removeSource: (id: string) => del(`${V1}/blocklist/sources/${id}`),
@@ -232,6 +236,11 @@ export const api = {
     profiles: () => get<List<BlocklistProfile>>(`${V1}/blocklist/profiles`),
     lookup: (name: string) => get<BlocklistLookup>(`${V1}/blocklist/lookup?name=${enc(name)}`),
     changes: (id: number, q: BlocklistChangesQuery) => get<List<BlocklistChange>>(`${V1}/blocklist/builds/${id}/changes${qs({ ...q })}`),
+    rpzUpstreams: () => get<List<RPZUpstream>>(`${V1}/rpz/upstreams`),
+    createRPZUpstream: (u: RPZUpstreamCreate) => post<RPZUpstream>(`${V1}/rpz/upstreams`, u),
+    updateRPZUpstream: (id: string, u: RPZUpstreamPatch) => patch<RPZUpstream>(`${V1}/rpz/upstreams/${id}`, u),
+    removeRPZUpstream: (id: string) => del(`${V1}/rpz/upstreams/${id}`),
+    syncRPZUpstream: (id: string) => post<RPZUpstream>(`${V1}/rpz/upstreams/${id}/sync`, {}),
   },
   allowlist: {
     list: () => get<List<AllowEntry>>(`${V1}/allowlist`),
@@ -303,12 +312,14 @@ export const qk = {
   profileVersion: (id: string, v: number) => ['profiles', id, 'versions', v] as const,
   versionDiff: (id: string, a: number, b: number) => ['profiles', id, 'diff', a, b] as const,
   blocklistSources: (profileId?: string) => ['blocklist', 'sources', profileId ?? null] as const,
+  blocklistSource: (id: string) => ['blocklist', 'source', id] as const,
   blocklistBuilds: (profileId?: string) => ['blocklist', 'builds', profileId ?? null] as const,
   blocklistCurrent: (profileId?: string) => ['blocklist', 'current', profileId ?? null] as const,
   blocklistProfiles: ['blocklist', 'profiles'] as const,
   // Family keys: a prefix that matches every scope's query (the per-query keys above end in
   // a profile id, so the bare ["blocklist","sources"] is the correct prefix for "all").
   blocklistSourcesAll: ['blocklist', 'sources'] as const,
+  rpzUpstreams: ['rpz', 'upstreams'] as const,
   blocklistBuildsAll: ['blocklist', 'builds'] as const,
   blocklistCurrentAll: ['blocklist', 'current'] as const,
   blocklistLookup: (name: string) => ['blocklist', 'lookup', name] as const,
@@ -397,6 +408,12 @@ export const useVersionDiff = (id: string, a: number | undefined, b: number | un
   })
 export const useBlocklistSources = (profileId?: string) =>
   useQuery({ queryKey: qk.blocklistSources(profileId), queryFn: () => api.blocklist.sources(profileId) })
+export const useBlocklistSource = (id: string | undefined) =>
+  useQuery({
+    queryKey: qk.blocklistSource(id ?? ''),
+    queryFn: () => api.blocklist.source(id ?? ''),
+    enabled: id !== undefined,
+  })
 export const useBlocklistBuilds = (profileId?: string) =>
   useQuery({
     queryKey: qk.blocklistBuilds(profileId),
@@ -501,7 +518,7 @@ export const useCreateSource = () => useMut(api.blocklist.createSource, () => [q
 export const useUpdateSource = () =>
   useMut(
     (a: { id: string; patch: BlocklistSourcePatch }) => api.blocklist.updateSource(a.id, a.patch),
-    () => [qk.blocklistSourcesAll, qk.blocklistProfiles, qk.blocklistCurrentAll, qk.blocklistBuildsAll],
+    (a) => [qk.blocklistSourcesAll, qk.blocklistProfiles, qk.blocklistCurrentAll, qk.blocklistBuildsAll, qk.blocklistSource(a.id)],
   )
 export const useDeleteSource = () => useMut(api.blocklist.removeSource, () => [qk.blocklistSourcesAll, qk.blocklistProfiles])
 export const useBuildNow = () =>
@@ -512,6 +529,22 @@ export const useBuildNow = () =>
     qk.blocklistProfiles,
     qk.overview,
   ])
+
+// RPZ slave (SPEC §7.7): an upstream owns a source of kind rpz_domains, so any change also
+// invalidates the source listings/builds.
+export const useRPZUpstreams = () =>
+  useQuery({ queryKey: qk.rpzUpstreams, queryFn: api.blocklist.rpzUpstreams, refetchInterval: LIVE })
+export const useCreateRPZUpstream = () =>
+  useMut(api.blocklist.createRPZUpstream, () => [qk.rpzUpstreams, qk.blocklistSourcesAll])
+export const useUpdateRPZUpstream = () =>
+  useMut((a: { id: string; patch: RPZUpstreamPatch }) => api.blocklist.updateRPZUpstream(a.id, a.patch), () => [
+    qk.rpzUpstreams,
+    qk.blocklistSourcesAll,
+  ])
+export const useDeleteRPZUpstream = () =>
+  useMut(api.blocklist.removeRPZUpstream, () => [qk.rpzUpstreams, qk.blocklistSourcesAll, qk.blocklistBuildsAll])
+export const useSyncRPZUpstream = () =>
+  useMut(api.blocklist.syncRPZUpstream, () => [qk.rpzUpstreams, qk.blocklistSourcesAll, qk.blocklistCurrentAll])
 
 export const useAddAllow = () => useMut(api.allowlist.create, () => [qk.allowlist, ['blocklist', 'lookup']])
 export const useDeleteAllow = () => useMut(api.allowlist.remove, () => [qk.allowlist, ['blocklist', 'lookup']])

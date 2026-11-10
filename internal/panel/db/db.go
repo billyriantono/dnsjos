@@ -46,6 +46,16 @@ func Connect(ctx context.Context, url string) (*pgxpool.Pool, error) {
 
 const migrateLockID = 0x646e736a6f73 // "dnsjos"
 
+// migrationAliases maps IDs that were applied by earlier production binaries before
+// migrations were renumbered during rebases. The SQL is unchanged, so treating the legacy
+// ID as its current name prevents the runner from applying the same schema change twice.
+var migrationAliases = map[string]string{
+	"0013_speedcheck_report": "0014_speedcheck_report",
+	"0014_rpz_upstreams":     "0017_rpz_upstreams",
+	"0015_source_profiles":   "0018_source_profiles",
+	"0016_default_group_id":  "0019_default_group_id",
+}
+
 // Migrate applies every not-yet-applied migrations/*.up.sql in lexical order, each in
 // its own transaction. A session advisory lock serialises concurrent panels.
 func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []string, err error) {
@@ -67,6 +77,11 @@ func Migrate(ctx context.Context, pool *pgxpool.Pool) (applied []string, err err
 	done, err := pgx.CollectRows(rows, pgx.RowTo[string])
 	if err != nil {
 		return nil, err
+	}
+	for i, version := range done {
+		if current, ok := migrationAliases[version]; ok {
+			done[i] = current
+		}
 	}
 
 	files, err := fs.Glob(migrations.FS, "*.up.sql")

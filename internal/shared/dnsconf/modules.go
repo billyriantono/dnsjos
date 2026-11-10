@@ -72,14 +72,59 @@ const skipNameLua = `local function skipName(p, pos)
 end
 `
 
-func renderBlocking(b api.Blocking, rt api.NodeRuntime) ([]byte, error) {
-	v4, err := netip.ParseAddr(b.BlockpageIPv4)
-	if err != nil || !v4.Is4() {
-		return nil, fmt.Errorf("blocking.blockpage_ipv4: %q is not IPv4", b.BlockpageIPv4)
+// parseBlockpageIPs splits a comma/space-separated blockpage field into addresses.
+// The first entry stays the primary (used for the response-IP rewrite and the
+// agent self-check); every entry is served as an answer for fallback.
+// ponytail: 8 covers redundant anycast pairs; raise it if a fleet needs more.
+func parseBlockpageIPs(s string, wantV4 bool) ([]netip.Addr, error) {
+	var out []netip.Addr
+	for _, f := range strings.FieldsFunc(s, func(r rune) bool { return r == ',' || r == ' ' }) {
+		a, err := netip.ParseAddr(f)
+		if err != nil || a.Zone() != "" {
+			return nil, fmt.Errorf("%q is not an IP address", f)
+		}
+		if wantV4 && !a.Is4() {
+			return nil, fmt.Errorf("%q is not an IPv4 address", f)
+		}
+		if !wantV4 && (!a.Is6() || a.Is4In6()) {
+			return nil, fmt.Errorf("%q is not an IPv6 address", f)
+		}
+		out = append(out, a)
 	}
-	v6, err := netip.ParseAddr(b.BlockpageIPv6)
-	if err != nil || !v6.Is6() {
-		return nil, fmt.Errorf("blocking.blockpage_ipv6: %q is not IPv6", b.BlockpageIPv6)
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%q has no IP address", s)
+	}
+	if len(out) > 8 {
+		return nil, fmt.Errorf("%d addresses: max 8", len(out))
+	}
+	return out, nil
+}
+
+// spoofAddrs renders one Lua address or a {..} table for SpoofAction.
+func spoofAddrs(addrs []netip.Addr) string {
+	if len(addrs) == 1 {
+		return luaString(addrs[0].String())
+	}
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, a := range addrs {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		b.WriteString(luaString(a.String()))
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+func renderBlocking(b api.Blocking, rt api.NodeRuntime) ([]byte, error) {
+	v4s, err := parseBlockpageIPs(b.BlockpageIPv4, true)
+	if err != nil {
+		return nil, fmt.Errorf("blocking.blockpage_ipv4: %w", err)
+	}
+	v6s, err := parseBlockpageIPs(b.BlockpageIPv6, false)
+	if err != nil {
+		return nil, fmt.Errorf("blocking.blockpage_ipv6: %w", err)
 	}
 	soa, err := soaWire(b.SOA)
 	if err != nil {
@@ -161,8 +206,8 @@ addAction(blocked(), LuaAction(function() incMetric("dnsjos-blocked") return DNS
 	answer := func(qtype, action string) {
 		w("addAction(AndRule({blocked(), QTypeRule(DNSQType.%s)}), %s, {name = \"dnsjos-block-%s\"})\n", qtype, action, strings.ToLower(qtype))
 	}
-	answer("A", "SpoofAction("+luaString(v4.String())+")")
-	answer("AAAA", "SpoofAction("+luaString(v6.String())+")")
+	answer("A", "SpoofAction("+spoofAddrs(v4s)+", {ttl = 60})")
+	answer("AAAA", "SpoofAction("+spoofAddrs(v6s)+", {ttl = 60})")
 	if b.TXT != "" {
 		answer("TXT", "SpoofRawAction("+luaString(string([]byte{byte(len(b.TXT))})+b.TXT)+", {ttl = 60})")
 	}
@@ -172,7 +217,7 @@ addAction(blocked(), LuaAction(function() incMetric("dnsjos-blocked") return DNS
 `)
 
 	if b.BlockResponseIPs {
-		a4 := v4.As4()
+		a4 := v4s[0].As4()
 		w(`
 -- Response IPs: when any A record's address is in the CDB (key = dotted quad in wire
 -- form), EVERY A record in the answer is rewritten to the blockpage with TTL 60, so the

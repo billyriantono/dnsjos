@@ -296,14 +296,21 @@ func (a *agent) verifyDnsdist(ctx context.Context) error {
 	if !cfg.Spec.Blocking.Enabled || name == "" || cfg.Spec.Blocking.BlockpageIPv4 == "" {
 		return nil
 	}
+	want := map[string]bool{}
+	for _, f := range strings.FieldsFunc(cfg.Spec.Blocking.BlockpageIPv4, func(r rune) bool { return r == ',' || r == ' ' }) {
+		want[f] = true
+	}
 	r, err := query(name)
 	if err != nil {
 		return err
 	}
 	for _, rr := range r.Answer {
-		if a4, ok := rr.(*dns.A); ok && a4.A.String() == cfg.Spec.Blocking.BlockpageIPv4 {
-			return nil
+		if a4, ok := rr.(*dns.A); ok && want[a4.A.String()] {
+			delete(want, a4.A.String())
 		}
+	}
+	if len(want) == 0 {
+		return nil
 	}
 	return fmt.Errorf("blocked name %s did not return the blockpage %s: %v", name, cfg.Spec.Blocking.BlockpageIPv4, r.Answer)
 }

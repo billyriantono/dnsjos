@@ -45,14 +45,41 @@ func newProfile(t *testing.T, pool *pgxpool.Pool, name string) string {
 }
 
 // addSource inserts one enabled manual source in a scope ("" = global) and returns its id.
+// A non-empty scope also gets a blocklist_source_profiles row, mirroring what the migration
+// backfills and what the CRUD writes, so the join table is the single source of truth.
 func addSource(t *testing.T, pool *pgxpool.Pool, name, kind, content, profileID string) string {
 	t.Helper()
+	ctx := context.Background()
 	var id string
-	if err := pool.QueryRow(context.Background(),
+	if err := pool.QueryRow(ctx,
 		`INSERT INTO blocklist_sources (name, kind, content, profile_id)
 		 VALUES ($1, $2, $3, nullif($4, '')::uuid) RETURNING id::text`,
 		name, kind, content, profileID).Scan(&id); err != nil {
 		t.Fatal(err)
+	}
+	if profileID != "" {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO blocklist_source_profiles (source_id, profile_id) VALUES ($1, $2)`, id, profileID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return id
+}
+
+// addSharedSource inserts one enabled manual source tied to every profile in profileIDs via
+// the join table (an empty list = global) and returns its id.
+func addSharedSource(t *testing.T, pool *pgxpool.Pool, name, kind, content string, profileIDs ...string) string {
+	t.Helper()
+	ctx := context.Background()
+	var id string
+	if err := pool.QueryRow(ctx, `INSERT INTO blocklist_sources (name, kind, content) VALUES ($1, $2, $3) RETURNING id::text`,
+		name, kind, content).Scan(&id); err != nil {
+		t.Fatal(err)
+	}
+	for _, pid := range profileIDs {
+		if _, err := pool.Exec(ctx, `INSERT INTO blocklist_source_profiles (source_id, profile_id) VALUES ($1, $2)`, id, pid); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return id
 }
@@ -79,6 +106,28 @@ func blockedIn(t *testing.T, s *Service, b api.BlocklistBuild, name string) bool
 		t.Fatal(err)
 	}
 	return res.Blocked
+}
+
+func TestDirtySourceForcesRecentScopeBuild(t *testing.T) {
+	s, pool := newProfileSvc(t)
+	profile := newProfile(t, pool, "dirty-profile")
+	sourceID := addSource(t, pool, "dirty", "rpz_domains", "old.example", profile)
+	before := buildScope(t, s, profile)
+
+	// The normal interval would skip this recent build; a successful source sync marks
+	// the owning scope dirty and must make tick rebuild it immediately.
+	exec(t, pool, `UPDATE blocklist_sources SET content = 'new.example' || chr(10) WHERE id = $1`, sourceID)
+	s.markDirty(context.Background(), sourceID)
+	if err := s.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	cur, err := Current(context.Background(), pool, profile)
+	if err != nil || cur == nil || cur.ID == before.ID {
+		t.Fatalf("dirty scope current = %+v (before %d), err=%v", cur, before.ID, err)
+	}
+	if !blockedIn(t, s, *cur, "new.example") || blockedIn(t, s, *cur, "old.example") {
+		t.Fatalf("dirty rebuild artifact does not reflect updated source")
+	}
 }
 
 // A profile build is its own sources plus the global ones, and nothing from another

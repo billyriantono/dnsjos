@@ -109,8 +109,10 @@ func TestListBuildsScopedHTTP(t *testing.T) {
 	}
 }
 
-// listSources distinguishes absent (all scopes) from present-but-empty (global). The UI's
-// Global/All selector relies on it; both must return 200 and the right scope.
+// listSources distinguishes absent (all scopes) from present-but-empty (the global scope,
+// which is global+global-only here). A profile scope lists its own sources plus the global
+// ones it inherits — exactly what its build uses — while the global scope lists only the
+// global sources. The UI's Global/All selector relies on the absent/empty distinction.
 func TestListSourcesScopeHTTP(t *testing.T) {
 	_, pool, call := newHandlerSvc(t)
 	a := newProfile(t, pool, "A")
@@ -123,11 +125,40 @@ func TestListSourcesScopeHTTP(t *testing.T) {
 	call("GET", "/api/v1/blocklist/sources?profile_id=", "", 200, &global)
 	call("GET", "/api/v1/blocklist/sources?profile_id="+a, "", 200, &scoped)
 
-	if all.Total != 2 || global.Total != 1 || scoped.Total != 1 {
-		t.Fatalf("all=%d global=%d scoped=%d, want 2/1/1", all.Total, global.Total, scoped.Total)
+	// all: both. global: the global source only. A: its own + the inherited global one.
+	if all.Total != 2 || global.Total != 1 || scoped.Total != 2 {
+		t.Fatalf("all=%d global=%d scoped=%d, want 2/1/2", all.Total, global.Total, scoped.Total)
 	}
-	if global.Items[0].ProfileID != "" || scoped.Items[0].ProfileID != a {
-		t.Fatalf("scope leak: global %q scoped %q", global.Items[0].ProfileID, scoped.Items[0].ProfileID)
+	if global.Items[0].ProfileID != "" {
+		t.Fatalf("global scope leaked a profile source: %+v", global.Items[0])
+	}
+	var own, inherited int
+	for _, s := range scoped.Items {
+		if len(s.ProfileIDs) == 1 && s.ProfileIDs[0] == a {
+			own++
+		} else if len(s.ProfileIDs) == 0 {
+			inherited++
+		}
+	}
+	if own != 1 || inherited != 1 {
+		t.Fatalf("A scope own=%d inherited=%d, want 1/1", own, inherited)
+	}
+}
+
+func TestListSourcesOmitsContentAndDetailIncludesItHTTP(t *testing.T) {
+	_, pool, call := newHandlerSvc(t)
+	content := strings.Repeat("very-large-domain.example\n", 1000)
+	id := addSource(t, pool, "large", "manual_domains", content, "")
+
+	var list api.List[api.BlocklistSource]
+	call("GET", "/api/v1/blocklist/sources", "", http.StatusOK, &list)
+	if len(list.Items) != 1 || list.Items[0].Content != "" {
+		t.Fatalf("list content = %q, want empty", list.Items[0].Content)
+	}
+	var detail api.BlocklistSource
+	call("GET", "/api/v1/blocklist/sources/"+id, "", http.StatusOK, &detail)
+	if detail.Content != content {
+		t.Fatalf("detail content length = %d, want %d", len(detail.Content), len(content))
 	}
 }
 
