@@ -1,3 +1,5 @@
+//go:build linux
+
 // Transparent DNS relay for TPROXY mode.
 //
 // dnsdist cannot open IP_TRANSPARENT sockets, so nftables TPROXY cannot deliver
@@ -70,6 +72,7 @@ func RunRelay(ctx context.Context, cfg RelayConfig) error {
 		clientConn: make(map[netip.AddrPort]*clientSock),
 		done:       make(chan struct{}),
 		tcpSlots:   make(chan struct{}, 256),
+		tcpConns:   make(map[net.Conn]struct{}),
 	}
 	defer r.close()
 
@@ -166,6 +169,7 @@ type relay struct {
 	done       chan struct{}
 	tcpWG      sync.WaitGroup
 	tcpSlots   chan struct{}
+	tcpConns   map[net.Conn]struct{}
 }
 
 func (r *relay) close() {
@@ -180,7 +184,12 @@ func (r *relay) close() {
 	for _, c := range r.clientConn {
 		conns = append(conns, c.conn)
 	}
+	tcp := make([]net.Conn, 0, len(r.tcpConns))
+	for c := range r.tcpConns {
+		tcp = append(tcp, c)
+	}
 	r.clientConn = map[netip.AddrPort]*clientSock{}
+	r.tcpConns = map[net.Conn]struct{}{}
 	r.mu.Unlock()
 	for _, b := range r.backends {
 		b.conn.Close()
@@ -198,6 +207,9 @@ func (r *relay) close() {
 		r.tcp6.Close()
 	}
 	for _, c := range conns {
+		c.Close()
+	}
+	for _, c := range tcp {
 		c.Close()
 	}
 }
@@ -467,7 +479,20 @@ func (r *relay) acceptTCP(ln net.Listener) {
 		r.tcpWG.Add(1)
 		go func() {
 			defer r.tcpWG.Done()
-			defer c.Close()
+			r.mu.Lock()
+			if r.closed {
+				r.mu.Unlock()
+				c.Close()
+				return
+			}
+			r.tcpConns[c] = struct{}{}
+			r.mu.Unlock()
+			defer func() {
+				r.mu.Lock()
+				delete(r.tcpConns, c)
+				r.mu.Unlock()
+				c.Close()
+			}()
 			r.handleTCP(c)
 		}()
 	}
@@ -480,6 +505,15 @@ func (r *relay) handleTCP(client net.Conn) {
 	default: // too many TCP connections; drop this one rather than exhaust goroutines
 		return
 	}
+	// DNS queries are small; require the first bytes quickly so an idle connection
+	// cannot hold a slot for the full 30s deadline.
+	_ = client.SetReadDeadline(time.Now().Add(5 * time.Second))
+	var first [1]byte
+	if _, err := io.ReadFull(client, first[:]); err != nil {
+		return
+	}
+	_ = client.SetReadDeadline(time.Time{}) // query is flowing; use the full deadline below
+	clientReader := io.MultiReader(bytes.NewReader(first[:]), client)
 	src := tcpAddrPort(client.RemoteAddr())
 	dst := tcpAddrPort(client.LocalAddr())
 	if !src.IsValid() || !dst.IsValid() || src.Addr().Is4() != dst.Addr().Is4() {
@@ -503,7 +537,7 @@ func (r *relay) handleTCP(client net.Conn) {
 	tcpWG.Add(1)
 	go func() {
 		defer tcpWG.Done()
-		_, _ = io.Copy(backend, client)
+		_, _ = io.Copy(backend, clientReader)
 		if tc, ok := backend.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}

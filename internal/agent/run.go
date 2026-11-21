@@ -232,7 +232,9 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 				a.o.Log.Warn("applying the DNS redirect rules failed", "err", err)
 				a.mu.Lock()
 				a.tpPending = true
-				a.applyErr = "tproxy: " + err.Error()
+				if a.applyErr == "" || strings.HasPrefix(a.applyErr, "tproxy: ") {
+					a.applyErr = "tproxy: " + err.Error()
+				}
 				a.mu.Unlock()
 			} else {
 				a.mu.Lock()
@@ -278,14 +280,17 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 		a.o.Log.Error("config apply failed", "version", cfg.Version, "err", err)
 		return
 	}
+	spec := cfg.Spec
+	// dnsdist now runs this config. Track it even when the redirect fails: the 304 retry
+	// must retry *this* spec, otherwise a first-time enable would never retry and a
+	// disabled old spec would silently undo the node's new interception.
+	a.tpSpec = &spec
 	if tpErr != nil {
 		a.applied, a.applyErr, a.fetchErr = cfg.Version, "tproxy: "+tpErr.Error(), false
 		a.tpPending = true
 		a.o.Log.Error("DNS redirect apply failed", "version", cfg.Version, "err", tpErr)
 		return
 	}
-	spec := cfg.Spec
-	a.tpSpec = &spec
 	a.applied, a.applyErr, a.fetchErr, a.tpPending = cfg.Version, "", false, false
 	if changed {
 		a.dnsdistVer = dnsdistVersion(ctx, a.run)

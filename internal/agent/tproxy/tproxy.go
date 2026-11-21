@@ -227,6 +227,7 @@ Documentation=https://github.com/billyriantono/dnsjos
 After=network-online.target
 Wants=network-online.target
 Before=%s
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -239,7 +240,6 @@ Group=_dnsdist
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 ExecStart=%s tproxy-relay --port %d --dnsdist 127.0.0.1:%d
-StartLimitIntervalSec=0
 Restart=always
 RestartSec=2
 LimitNOFILE=65536
