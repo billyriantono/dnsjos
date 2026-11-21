@@ -229,6 +229,14 @@ Before=%s
 
 [Service]
 Type=simple
+# Run as _dnsdist on purpose: SO_REUSEPORT groups are per-UID since Linux 4.5, and
+# dnsdist owns the wildcard :53 group. A relay running as root cannot join that group,
+# so binding the original destination (e.g. 1.1.1.1:53) fails with EADDRINUSE and every
+# answer would leave from the wrong source. Same UID, same group.
+User=_dnsdist
+Group=_dnsdist
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 ExecStart=%s tproxy-relay --port %d --dnsdist 127.0.0.1:%d
 Restart=always
 RestartSec=2
