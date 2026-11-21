@@ -14,6 +14,7 @@ import (
 var (
 	nameRe     = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 	hostnameRe = regexp.MustCompile(`^(?i)[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]{0,61}[a-z0-9_])?)*\.?$`)
+	ifaceRe    = regexp.MustCompile(`^[A-Za-z0-9_.:@-]{1,15}$`)
 )
 
 // Validate reports every problem in the spec, joined into one error (nil when valid).
@@ -58,8 +59,8 @@ func (s ConfigSpec) Validate() error {
 	}
 
 	l := s.Listen
-	if !l.Do53.Enabled && !l.DoH.Enabled && !l.DoT.Enabled {
-		bad("listen", "at least one of do53, doh, dot must be enabled")
+	if !l.Do53.Enabled && !l.DoH.Enabled && !l.DoT.Enabled && !l.TProxy.Enabled {
+		bad("listen", "at least one of do53, doh, dot, tproxy must be enabled")
 	}
 	addrs("listen.do53.addresses", l.Do53.Addresses, l.Do53.Enabled)
 	if l.Do53.Enabled {
@@ -89,6 +90,68 @@ func (s ConfigSpec) Validate() error {
 	}
 	text("listen.tls.cert_file", l.TLS.CertFile)
 	text("listen.tls.key_file", l.TLS.KeyFile)
+
+	if tp := l.TProxy; tp.Enabled {
+		if !slices.Contains(TProxyModes, tp.EffectiveMode()) {
+			bad("listen.tproxy.mode", "must be one of %s", strings.Join(TProxyModes, ", "))
+		}
+		port := tp.EffectivePort()
+		if tp.Port != 0 && (tp.Port < 1 || tp.Port > 65535) {
+			bad("listen.tproxy.port", "must be 1..65535, got %d", tp.Port)
+		}
+		if tp.IsTProxy() && port >= 65535 {
+			bad("listen.tproxy.port", "%d leaves no room for the loopback dnsdist listener on port+1", port)
+		}
+		// dnsdist binds the redirect listener on both 0.0.0.0 and [::], so any other
+		// listener on that port (or dnsdist's own webserver) cannot coexist.
+		used := func(addr, field string, ports ...int) {
+			ap, err := netip.ParseAddrPort(addr)
+			if err != nil {
+				return
+			}
+			for _, p := range ports {
+				if int(ap.Port()) == p {
+					bad("listen.tproxy.port", "%d is already used by %s", p, field)
+				}
+			}
+		}
+		// In redirect mode the relay port is dnsdist's public listener. In TPROXY mode
+		// the relay owns Port and dnsdist listens on loopback Port+1.
+		ports := []int{port}
+		if tp.IsTProxy() {
+			ports = append(ports, port+1)
+		}
+		if l.Do53.Enabled {
+			for _, a := range l.Do53.Addresses {
+				used(a, "listen.do53.addresses", ports...)
+			}
+		}
+		if l.DoH.Enabled {
+			for _, a := range l.DoH.Addresses {
+				used(a, "listen.doh.addresses", ports...)
+			}
+		}
+		if l.DoT.Enabled {
+			for _, a := range l.DoT.Addresses {
+				used(a, "listen.dot.addresses", ports...)
+			}
+		}
+		used(s.Webserver.Listen, "webserver.listen", ports...)
+		// dnsdist's console and the agent's dnstap/analytics listeners are loopback only,
+		// but the wildcard redirect listener would still collide with them.
+		used("127.0.0.1:5199", "the dnsdist console", ports...)
+		used("127.0.0.1:6000", "the blocked-query dnstap listener", ports...)
+		if s.Analytics.Enabled {
+			used(s.Analytics.StreamAddr, "analytics.stream_addr", ports...)
+		}
+		prefixes("listen.tproxy.sources", tp.Sources)
+		prefixes("listen.tproxy.exclude_dst", tp.ExcludeDst)
+		for i, name := range tp.Interfaces {
+			if !ifaceRe.MatchString(name) {
+				bad(fmt.Sprintf("listen.tproxy.interfaces[%d]", i), "%q is not a network interface name", name)
+			}
+		}
+	}
 
 	if len(s.ACL) == 0 {
 		bad("acl", "at least one CIDR required")

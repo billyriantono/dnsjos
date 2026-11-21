@@ -83,6 +83,26 @@ type Heartbeat struct {
 	UpgradeInProgress bool           `json:"upgrade_in_progress"`
 	// AllowlistVersion is the allowlist the node enforces ("" = none applied yet).
 	AllowlistVersion string `json:"allowlist_version"`
+	// TProxy is the live state of transparent DNS interception (SPEC §6.14), nil when
+	// the profile does not enable it. Older agents omit it.
+	TProxy *TProxyStatus `json:"tproxy,omitempty"`
+}
+
+// TProxyStatus is what the agent observed on the node in this heartbeat: the units the
+// panel cannot see directly from another host.
+type TProxyStatus struct {
+	Enabled       bool   `json:"enabled"`
+	Mode          string `json:"mode"`
+	Port          int    `json:"port"`
+	NFTLoaded     bool   `json:"nft_loaded"`
+	RelayActive   bool   `json:"relay_active"`   // tproxy mode only
+	PolicyRouting bool   `json:"policy_routing"` // tproxy mode only: fwmark rule + table 5315
+	// InterceptedPackets/Bytes are the nft rule counters since the table was last
+	// reloaded. Watching them increase is how an operator confirms real traffic is being
+	// intercepted, not just that the units are active.
+	InterceptedPackets uint64 `json:"intercepted_packets"`
+	InterceptedBytes   uint64 `json:"intercepted_bytes"`
+	Error              string `json:"error"`
 }
 
 // UpgradeResult is the outcome of the node's most recent upgrade_dnsdist / upgrade_agent.

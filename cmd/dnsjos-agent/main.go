@@ -5,6 +5,7 @@
 //	dnsjos-agent enroll --recursor --kind pdns|unbound --panel URL --token T [--name NAME]
 //	dnsjos-agent [run] [--root DIR] [--no-systemd] [--dnsdist-web URL] [--flush-interval D]
 //	dnsjos-agent plan [--root DIR] [--no-systemd]
+//	dnsjos-agent tproxy-relay --port 5300 --dnsdist 127.0.0.1:5301
 //	dnsjos-agent version
 package main
 
@@ -18,6 +19,7 @@ import (
 	"syscall"
 
 	"github.com/billyriantono/dnsjos/internal/agent"
+	"github.com/billyriantono/dnsjos/internal/agent/tproxy"
 )
 
 var version = "dev"
@@ -38,6 +40,8 @@ func main() {
 	var panel, token, name string
 	var adopt, recursor bool
 	var kind string
+	var relayPort int
+	var relayBackend string
 	if cmd == "enroll" {
 		fs.BoolVar(&recursor, "recursor", false, "enroll this host as a recursor (PowerDNS Recursor or Unbound), not a dnsdist node")
 		fs.StringVar(&kind, "kind", "", "recursor only: the resolver installed here, pdns or unbound")
@@ -45,6 +49,10 @@ func main() {
 		fs.StringVar(&panel, "panel", "", "panel URL, e.g. https://panel.example")
 		fs.StringVar(&token, "token", "", "enrollment token")
 		fs.StringVar(&name, "name", "", "hostname to report (default: this host's name)")
+	}
+	if cmd == "tproxy-relay" {
+		fs.IntVar(&relayPort, "port", 5300, "transparent TPROXY port")
+		fs.StringVar(&relayBackend, "dnsdist", "127.0.0.1:5301", "loopback dnsdist listener with PROXY protocol")
 	}
 	fs.Parse(args)
 
@@ -67,6 +75,8 @@ func main() {
 		}
 	case "plan":
 		err = agent.Plan(ctx, o, os.Stdout)
+	case "tproxy-relay":
+		err = tproxy.RunRelay(ctx, tproxy.RelayConfig{Port: relayPort, DNSDistAddr: relayBackend, Log: o.Log})
 	case "run":
 		if agent.IsRecursor(o) {
 			err = agent.RunRecursor(ctx, o)
@@ -74,7 +84,7 @@ func main() {
 			err = agent.Run(ctx, o)
 		}
 	default:
-		err = fmt.Errorf("unknown command %q (enroll | plan | run | version)", cmd)
+		err = fmt.Errorf("unknown command %q (enroll | plan | run | tproxy-relay | version)", cmd)
 	}
 	if err != nil {
 		o.Log.Error(err.Error())

@@ -29,10 +29,11 @@ type ConfigSpec struct {
 }
 
 type Listen struct {
-	Do53 Do53 `json:"do53"`
-	DoH  DoH  `json:"doh"`
-	DoT  DoT  `json:"dot"`
-	TLS  TLS  `json:"tls"`
+	Do53   Do53   `json:"do53"`
+	DoH    DoH    `json:"doh"`
+	DoT    DoT    `json:"dot"`
+	TLS    TLS    `json:"tls"`
+	TProxy TProxy `json:"tproxy"`
 }
 
 type Do53 struct {
@@ -40,6 +41,76 @@ type Do53 struct {
 	Addresses          []string `json:"addresses"`
 	ReusePortListeners int      `json:"reuse_port_listeners"`
 }
+
+// TProxyDefaultPort is where dnsdist accepts queries redirected by the node's netfilter
+// rules when TProxy.Port is 0.
+const TProxyDefaultPort = 5300
+
+// TProxy modes. Redirect is the kernel-DNAT mode that works with a normal dnsdist
+// listener. TProxy is real IP_TRANSPARENT interception through the agent's transparent
+// relay, required when the packet must keep its original destination (core routers with
+// policy routing / FBF).
+const (
+	TProxyModeRedirect = "redirect"
+	TProxyModeTProxy   = "tproxy"
+)
+
+// TProxyModes are the accepted modes of TProxy.Mode.
+var TProxyModes = []string{TProxyModeRedirect, TProxyModeTProxy}
+
+// TProxy makes the node intercept DNS queries that pass through it (a gateway/router)
+// and send them to dnsdist without touching client settings. dnsdist has no
+// IP_TRANSPARENT/TPROXY sockets and cannot bind a non-local destination. In REDIRECT
+// mode the agent installs an nftables REDIRECT into a dedicated dnsdist listener; in
+// TPROXY mode an agent relay with IP_TRANSPARENT sockets preserves the original
+// destination and forwards to dnsdist over PROXY protocol. Neither mode rewrites answers
+// or touches traffic that is not DNS on port 53.
+type TProxy struct {
+	Enabled bool `json:"enabled"`
+	// Mode selects the interception mechanism:
+	//   "" / "redirect" (default): nftables REDIRECT into a dnsdist listener on Port.
+	//   "tproxy": real nftables TPROXY (IP_TRANSPARENT) into the agent's transparent relay
+	//   on Port; dnsdist listens on 127.0.0.1:Port+1 with PROXY protocol. Use this when
+	//   the traffic is policy-routed / FBF and must keep its original destination.
+	Mode string `json:"mode"`
+	// Port is the dnsdist listener for redirected queries. 0 = 5300. It must not collide
+	// with another dnsdist listener (especially port 53).
+	Port int `json:"port"`
+	// Sources limits interception to these client CIDRs (empty = every client). They are
+	// added to the dnsdist ACL automatically: a redirected client that the ACL refuses
+	// would get no answer at all.
+	Sources []string `json:"sources"`
+	// ExcludeDst are destination CIDRs never intercepted. In REDIRECT mode dnsdist's own
+	// upstreams are excluded automatically; TPROXY mode needs explicit exclusions if a
+	// recursive resolver behind this node must not be intercepted.
+	ExcludeDst []string `json:"exclude_dst"`
+	// Interfaces limits interception to traffic arriving on these interfaces
+	// (empty = every interface).
+	Interfaces []string `json:"interfaces"`
+	// DisableRPFilter turns off strict reverse-path filtering on the interception
+	// interfaces. FBF / policy-routed traffic usually needs this; it is opt-in because
+	// it weakens uRPF on the node.
+	DisableRPFilter bool `json:"disable_rp_filter"`
+}
+
+// EffectivePort is TProxy.Port with the default applied.
+func (t TProxy) EffectivePort() int {
+	if t.Port == 0 {
+		return TProxyDefaultPort
+	}
+	return t.Port
+}
+
+// EffectiveMode is TProxy.Mode with the redirect default applied.
+func (t TProxy) EffectiveMode() string {
+	if t.Mode == "" {
+		return TProxyModeRedirect
+	}
+	return t.Mode
+}
+
+// IsTProxy reports whether the real IP_TRANSPARENT relay mode is selected.
+func (t TProxy) IsTProxy() bool { return t.EffectiveMode() == TProxyModeTProxy }
 
 type DoH struct {
 	Enabled   bool     `json:"enabled"`
@@ -293,10 +364,11 @@ func DefaultConfigSpec() ConfigSpec {
 	}
 	return ConfigSpec{
 		Listen: Listen{
-			Do53: Do53{Enabled: true, Addresses: []string{"0.0.0.0:53", "[::]:53"}, ReusePortListeners: 1},
-			DoH:  DoH{Addresses: []string{"0.0.0.0:443", "[::]:443"}, Path: "/dns-query"},
-			DoT:  DoT{Addresses: []string{"0.0.0.0:853", "[::]:853"}},
-			TLS:  TLS{CertFile: "/etc/dnsdist/tls/cert.pem", KeyFile: "/etc/dnsdist/tls/key.pem"},
+			Do53:   Do53{Enabled: true, Addresses: []string{"0.0.0.0:53", "[::]:53"}, ReusePortListeners: 1},
+			DoH:    DoH{Addresses: []string{"0.0.0.0:443", "[::]:443"}, Path: "/dns-query"},
+			DoT:    DoT{Addresses: []string{"0.0.0.0:853", "[::]:853"}},
+			TLS:    TLS{CertFile: "/etc/dnsdist/tls/cert.pem", KeyFile: "/etc/dnsdist/tls/key.pem"},
+			TProxy: TProxy{Mode: TProxyModeRedirect, Port: TProxyDefaultPort},
 		},
 		// Private, CGNAT, loopback and link-local space only. Add your own public customer
 		// prefixes in the panel (a profile or node override) — they are deployment data.
@@ -353,8 +425,8 @@ func DefaultConfigSpec() ConfigSpec {
 			AliasesWanted: 8, MinOK: 3, RefreshIntervalH: 6,
 		},
 		SpeedCheck: SpeedCheck{Mode: DefaultSpeedCheckMode, AnswerMode: AnswerModeFastestIP, MaxReplyIPNum: 8, Exclude: []string{}}, // fastest_ip opt-in
-		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                // opt-in: see DualStack
-		IPAlias:    IPAlias{},                                                                      // opt-in: pin CDN answers to a chosen edge
+		DualStack:  DualStack{ThresholdMs: 10, Exclude: []string{}},                                                                 // opt-in: see DualStack
+		IPAlias:    IPAlias{},                                                                                                       // opt-in: pin CDN answers to a chosen edge
 		DNSSEC:     DNSSEC{Exclude: []string{}},
 		Tuning:     Tuning{UDPBufferBytes: 16777216},
 		Webserver:  Webserver{Listen: "127.0.0.1:8083", PrometheusACL: []string{"127.0.0.1/32"}},

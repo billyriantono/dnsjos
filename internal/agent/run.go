@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/billyriantono/dnsjos/internal/agent/dnstap"
 	"github.com/billyriantono/dnsjos/internal/agent/dualstack"
 	"github.com/billyriantono/dnsjos/internal/agent/speedcheck"
+	"github.com/billyriantono/dnsjos/internal/agent/tproxy"
 	"github.com/billyriantono/dnsjos/internal/shared/api"
 	"github.com/billyriantono/dnsjos/internal/shared/dnsconf"
 )
@@ -60,10 +62,12 @@ type agent struct {
 	mu         sync.Mutex
 	cfg        *api.AgentConfig // newest config received
 	seen       int              // its version (sent as ETag)
+	tpSpec     *api.ConfigSpec  // spec whose TProxy rules were last applied successfully
 	applied    int
 	applyErr   string
 	fetchErr   bool // applyErr came from a 409 on GET /config, not from applying
 	blErr      string
+	tpPending  bool // the redirect rules failed to install; retry even without a new config
 	wantSHA    string
 	cgkStatus  api.CGKStatus
 	cgkForce   bool
@@ -143,6 +147,12 @@ func newAgent(ctx context.Context, o Options) (*agent, error) {
 	return a, nil
 }
 
+// restartRelayAfterUpgrade makes the transparent relay run the new agent binary after an
+// agent upgrade. Remove it once the relay no longer embeds the agent.
+func (a *agent) restartRelayAfterUpgrade(ctx context.Context) {
+	tproxy.RestartRelay(ctx, a.o.Log)
+}
+
 func (a *agent) config() *api.AgentConfig {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -208,10 +218,38 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	}
 	if cfg == nil { // 304: the panel serves the version we run again (e.g. a staged rollout pinned us back)
 		a.mu.Lock()
+		needTP, cur := a.tpPending, a.tpSpec
 		if a.fetchErr {
 			a.applyErr, a.fetchErr = "", false
 		}
 		a.mu.Unlock()
+		// Apply is idempotent. Run it on every unchanged-config poll while TProxy is
+		// enabled so a relay or nft unit that died (or never started after an agent
+		// upgrade or boot) is brought back without waiting for a profile change. It
+		// costs a couple of systemctl checks per poll.
+		if cur != nil && (needTP || cur.Listen.TProxy.Enabled) {
+			if err := tproxy.Apply(ctx, a.o.Root, *cur, a.o.NoSystemd, a.o.Log); err != nil {
+				a.o.Log.Warn("applying the DNS redirect rules failed", "err", err)
+				a.mu.Lock()
+				a.tpPending = true
+				if a.applyErr == "" || strings.HasPrefix(a.applyErr, "tproxy: ") {
+					a.applyErr = "tproxy: " + err.Error()
+				}
+				a.mu.Unlock()
+			} else {
+				a.mu.Lock()
+				a.tpPending = false
+				// Only clear an error this retry owns: a failed dnsdist apply must stay
+				// visible even though the redirect rules are fine.
+				if strings.HasPrefix(a.applyErr, "tproxy: ") {
+					a.applyErr = ""
+				}
+				a.mu.Unlock()
+				if needTP {
+					poke(a.hbNow)
+				}
+			}
+		}
 		return
 	}
 	a.mu.Lock()
@@ -228,14 +266,32 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	changed, err := a.app.Apply(ctx, cfg.Spec, a.runtime(), force)
 	a.opMu.Unlock()
 	poke(a.alNow) // after the apply: dnsdist now runs the blocking.lua that can reload
+	var tpErr error
+	if err == nil {
+		// The dnsdist config is live even if the redirect cannot be installed; report both
+		// so the panel shows the node as running the version with a visible tproxy error.
+		tpErr = tproxy.Apply(ctx, a.o.Root, cfg.Spec, a.o.NoSystemd, a.o.Log)
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
 		a.applyErr, a.fetchErr = fmt.Sprintf("config v%d: %v", cfg.Version, err), false
+		a.tpPending = false // the redirect must not follow a config dnsdist refused
 		a.o.Log.Error("config apply failed", "version", cfg.Version, "err", err)
 		return
 	}
-	a.applied, a.applyErr, a.fetchErr = cfg.Version, "", false
+	spec := cfg.Spec
+	// dnsdist now runs this config. Track it even when the redirect fails: the 304 retry
+	// must retry *this* spec, otherwise a first-time enable would never retry and a
+	// disabled old spec would silently undo the node's new interception.
+	a.tpSpec = &spec
+	if tpErr != nil {
+		a.applied, a.applyErr, a.fetchErr = cfg.Version, "tproxy: "+tpErr.Error(), false
+		a.tpPending = true
+		a.o.Log.Error("DNS redirect apply failed", "version", cfg.Version, "err", tpErr)
+		return
+	}
+	a.applied, a.applyErr, a.fetchErr, a.tpPending = cfg.Version, "", false, false
 	if changed {
 		a.dnsdistVer = dnsdistVersion(ctx, a.run)
 		a.o.Log.Info("config applied", "version", cfg.Version, "profile", cfg.Profile)
@@ -368,7 +424,11 @@ func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
 	hb.DnsdistCandidate, hb.DnsdistAvailable, hb.DnsdistRepoSeries = a.inv.Candidate, slices.Clone(a.inv.Available), a.inv.Series
 	hb.InventoryAt, hb.LastUpgrade, hb.UpgradeInProgress = a.inv.At, a.lastUp, a.upgrading
 	hb.AllowlistVersion = a.allowHave
+	spec := a.tpSpec
 	a.mu.Unlock()
+	if spec != nil {
+		hb.TProxy = tproxy.Status(ctx, a.o.Root, *spec, a.o.NoSystemd)
+	}
 	return hb
 }
 

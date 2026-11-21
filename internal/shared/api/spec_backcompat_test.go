@@ -19,6 +19,7 @@ func TestBackCompatDecode(t *testing.T) {
 	}
 	delete(m, "cname")
 	delete(m, "speed_check")
+	delete(m, "tproxy") // a pre-TProxy spec has no section at all
 	old, _ := json.Marshal(m)
 
 	var s ConfigSpec
@@ -33,6 +34,9 @@ func TestBackCompatDecode(t *testing.T) {
 	}
 	if s.CName.Enabled || len(s.CName.Rules) != 0 {
 		t.Errorf("missing cname: %+v, want disabled", s.CName)
+	}
+	if s.Listen.TProxy.EffectiveMode() != TProxyModeRedirect {
+		t.Errorf("missing tproxy mode = %q, want redirect", s.Listen.TProxy.EffectiveMode())
 	}
 	if err := s.Validate(); err != nil {
 		t.Errorf("spec without the newer sections must validate: %v", err)

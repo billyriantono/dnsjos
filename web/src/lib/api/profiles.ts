@@ -10,6 +10,10 @@ export const defaultSpec = (): ConfigSpec => ({
     doh: { enabled: false, addresses: ['0.0.0.0:443', '[::]:443'], path: '/dns-query' },
     dot: { enabled: false, addresses: ['0.0.0.0:853', '[::]:853'] },
     tls: { cert_file: '/etc/dnsdist/tls/cert.pem', key_file: '/etc/dnsdist/tls/key.pem' },
+    tproxy: {
+      enabled: false, mode: 'redirect', port: 5300, sources: [], exclude_dst: [], interfaces: [],
+      disable_rp_filter: false,
+    },
   },
   acl: [
     '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16', '172.16.0.0/12',

@@ -22,7 +22,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { ApiError, useNode, useNodeLive } from '@/lib/api/client'
-import { fmtMs, fmtPercent, fmtQps, shortSha } from '@/lib/format'
+import { fmtBytes, fmtMs, fmtPercent, fmtQps, shortSha } from '@/lib/format'
 
 export default function NodeDetailPage() {
   const { id = '' } = useParams()
@@ -123,6 +123,26 @@ export default function NodeDetailPage() {
           </Badge>
         ))}
       </div>
+      {hb?.tproxy && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">TProxy</span>
+          <Badge variant="secondary" className="font-normal">
+            {hb.tproxy.mode}
+          </Badge>
+          <span>port {hb.tproxy.port}</span>
+          <SyncBadge ok={hb.tproxy.nft_loaded} label="nft" />
+          {hb.tproxy.mode === 'tproxy' && (
+            <>
+              <SyncBadge ok={hb.tproxy.relay_active} label="relay" />
+              <SyncBadge ok={hb.tproxy.policy_routing} label="policy" />
+            </>
+          )}
+          <span title="nft rule counters since the last rules reload">
+            {hb.tproxy.intercepted_packets.toLocaleString()} hits · {fmtBytes(hb.tproxy.intercepted_bytes)}
+          </span>
+          {hb.tproxy.error && <span className="text-destructive">{hb.tproxy.error}</span>}
+        </div>
+      )}
 
       <Tabs defaultValue="overview">
         <TabsList className="max-w-full justify-start overflow-x-auto">

@@ -97,6 +97,12 @@ than the global set. The allowlist unblocks a wrongly listed CDN within ~15 s, w
   CGNAT addresses, and spoofed client subnets are replaced.
 - **DNSSEC** validation can be switched off per profile, or skipped only for zones with
   broken signatures (one click from the SERVFAIL list).
+- **Transparent DNS redirect (TProxy)**: a gateway or core-router node can intercept
+  passing port-53 traffic with nftables and answer it from dnsdist, with client addresses
+  preserved (per-profile or per-node toggle, optional client sources, interfaces and
+  destination exclusions). Two modes: **redirect** for direct clients, and real
+  **tproxy** (`IP_TRANSPARENT`) when an upstream core router uses FBF/policy routing and
+  the reply must come from the address the client queried.
 - **`whashedLatency`** and **serve-stale** keep answers fast and flowing when an upstream is slow or down.
 
 </td>

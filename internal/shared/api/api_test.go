@@ -12,6 +12,39 @@ func TestDefaultsValidate(t *testing.T) {
 	}
 }
 
+// TestTProxyCanBeTheOnlyListener: a dedicated redirector needs no plain port 53 listener.
+func TestTProxyCanBeTheOnlyListener(t *testing.T) {
+	s := DefaultConfigSpec()
+	s.Listen.Do53.Enabled = false
+	s.Listen.TProxy = TProxy{Enabled: true}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if s.Listen.TProxy.EffectivePort() != TProxyDefaultPort {
+		t.Fatalf("port = %d, want %d", s.Listen.TProxy.EffectivePort(), TProxyDefaultPort)
+	}
+}
+
+// TestTProxyModeCanBeTheOnlyListener: real TPROXY needs no public dnsdist listener; the
+// relay owns the port and dnsdist moves to loopback port+1.
+func TestTProxyModeCanBeTheOnlyListener(t *testing.T) {
+	s := DefaultConfigSpec()
+	s.Listen.Do53.Enabled = false
+	s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 5300,
+		Sources: []string{"0.0.0.0/0", "::/0"}, DisableRPFilter: true}
+	if err := s.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !s.Listen.TProxy.IsTProxy() || s.Listen.TProxy.EffectiveMode() != TProxyModeTProxy {
+		t.Fatalf("mode = %q", s.Listen.TProxy.EffectiveMode())
+	}
+	// An empty mode is the documented redirect default.
+	s.Listen.TProxy.Mode = ""
+	if s.Listen.TProxy.IsTProxy() || s.Listen.TProxy.EffectiveMode() != TProxyModeRedirect {
+		t.Fatalf("empty mode = %q, want redirect", s.Listen.TProxy.EffectiveMode())
+	}
+}
+
 // TestIPAliasValid checks a well-formed ip-alias spec (IPv4 and IPv6 rules) validates.
 func TestIPAliasValid(t *testing.T) {
 	s := DefaultConfigSpec()
@@ -107,6 +140,35 @@ func TestValidateRejects(t *testing.T) {
 		"sample_rate": func(s *ConfigSpec) { s.Analytics.SampleRate = 1001 },
 		"top_k":       func(s *ConfigSpec) { s.Analytics.TopK = 99 },
 		"stream_addr": func(s *ConfigSpec) { s.Analytics.StreamAddr = "localhost:6001" },
+		"tproxy port 53": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Port: 53}
+		},
+		"tproxy bad source": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Sources: []string{"10.0.0.0/33"}}
+		},
+		"tproxy bad exclude": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, ExcludeDst: []string{"nope"}}
+		},
+		"tproxy bad interface": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Interfaces: []string{"bad iface"}}
+		},
+		"tproxy webserver collision": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Port: 8083}
+		},
+		"tproxy bad mode": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: "magic"}
+		},
+		"tproxy mode no room": func(s *ConfigSpec) {
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 65535}
+		},
+		"tproxy mode loopback collision": func(s *ConfigSpec) {
+			// The loopback dnsdist listener on 5199 collides with the dnsdist console.
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 5198}
+		},
+		"tproxy mode public collision": func(s *ConfigSpec) {
+			s.Listen.Do53.Addresses = []string{"0.0.0.0:5300"}
+			s.Listen.TProxy = TProxy{Enabled: true, Mode: TProxyModeTProxy, Port: 5299}
+		},
 	}
 	for name, mutate := range cases {
 		s := DefaultConfigSpec()

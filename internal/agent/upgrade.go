@@ -415,8 +415,9 @@ func (a *agent) upgradeAgent(ctx context.Context) *api.UpgradeResult {
 		return &api.UpgradeResult{Kind: api.UpgradeAgent, From: a.o.Version, Error: err.Error(), At: time.Now().UTC()}
 	}
 	a.o.Log.Info("agent binary replaced, restarting")
-	a.heartbeat(ctx) // ack the command before exiting
-	a.opMu.Lock()    // let a running config apply finish first
+	a.restartRelayAfterUpgrade(ctx) // the relay unit runs this binary
+	a.heartbeat(ctx)                // ack the command before exiting
+	a.opMu.Lock()                   // let a running config apply finish first
 	a.stop(ErrRestart)
 	a.opMu.Unlock()
 	return nil

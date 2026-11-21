@@ -8,6 +8,24 @@ export interface Do53 {
   addresses: string[]
   reuse_port_listeners: number
 }
+/** §6.14: transparent interception of passing DNS queries (gateway/router nodes). */
+export type TProxyMode = 'redirect' | 'tproxy'
+export const TPROXY_MODES: TProxyMode[] = ['redirect', 'tproxy']
+export interface TProxy {
+  enabled: boolean
+  /** redirect = nftables REDIRECT into dnsdist; tproxy = IP_TRANSPARENT relay for FBF routers. */
+  mode: TProxyMode
+  /** dnsdist listener for redirected queries; 0 = 5300. Must not collide with another listener. */
+  port: number
+  /** Client CIDRs to intercept; empty = every client. Added to the dnsdist ACL automatically. */
+  sources: string[]
+  /** Destination CIDRs never intercepted; upstream servers are always excluded. */
+  exclude_dst: string[]
+  /** Ingress interfaces to intercept; empty = every interface. */
+  interfaces: string[]
+  /** Turn off strict rp_filter on the interception interfaces (usually needed for FBF). */
+  disable_rp_filter: boolean
+}
 export interface DoH {
   enabled: boolean
   addresses: string[]
@@ -26,6 +44,7 @@ export interface Listen {
   doh: DoH
   dot: DoT
   tls: TLS
+  tproxy: TProxy
 }
 
 export type ServerPolicy = 'whashed' | 'whashedLatency' | 'wrandom' | 'leastOutstanding' | 'roundrobin' | 'firstAvailable'
@@ -295,6 +314,20 @@ export interface Heartbeat {
   inventory_at: string | null
   last_upgrade: UpgradeResult | null
   upgrade_in_progress: boolean
+  /** Live interception state; absent when TProxy is disabled or the agent is old. */
+  tproxy?: TProxyStatus | null
+}
+
+export interface TProxyStatus {
+  enabled: boolean
+  mode: TProxyMode
+  port: number
+  nft_loaded: boolean
+  relay_active: boolean
+  policy_routing: boolean
+  intercepted_packets: number
+  intercepted_bytes: number
+  error: string
 }
 
 export type UpgradeKind = 'dnsdist' | 'agent'

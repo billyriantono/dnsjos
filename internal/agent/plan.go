@@ -128,6 +128,17 @@ func summary(cfg *api.AgentConfig, sha, cdb string) string {
 	} else {
 		p("dot:        off")
 	}
+	if tp := l.TProxy; tp.Enabled {
+		if tp.IsTProxy() {
+			p("tproxy:     on, mode tproxy (port 53 -> relay :%d, dnsdist 127.0.0.1:%d, %d source(s), %d excluded destination(s), %d interface(s))",
+				tp.EffectivePort(), tp.EffectivePort()+1, len(tp.Sources), len(tp.ExcludeDst), len(tp.Interfaces))
+		} else {
+			p("tproxy:     on, mode redirect (port 53 -> :%d, %d source(s), %d excluded destination(s), %d interface(s))",
+				tp.EffectivePort(), len(tp.Sources), len(tp.ExcludeDst), len(tp.Interfaces))
+		}
+	} else {
+		p("tproxy:     off")
+	}
 	if l.DoH.Enabled || l.DoT.Enabled {
 		p("tls:        cert %s key %s", l.TLS.CertFile, l.TLS.KeyFile)
 	}

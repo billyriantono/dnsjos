@@ -6,7 +6,9 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import type { SpecErrors } from '@/lib/api/profiles'
-import { DYN_ACTIONS, type ConfigSpec, type DynAction, type Listen, type SpeedCheck } from '@/lib/api/types'
+import {
+  DYN_ACTIONS, TPROXY_MODES, type ConfigSpec, type DynAction, type Listen, type SpeedCheck, type TProxyMode,
+} from '@/lib/api/types'
 import { fmtBytes } from '@/lib/format'
 import { cn } from '@/lib/utils'
 import { TABS, tabOf, useFieldErrors, useReadOnly, type TabId } from './context'
@@ -14,7 +16,7 @@ import { ListEditor, NumField, Section, SwitchField, TextField } from './fields'
 import { IPAliasEditor } from './IPAliasEditor'
 import { ServfailSuggestions } from './ServfailSuggestions'
 import { UpstreamsEditor } from './UpstreamsEditor'
-import { isCIDR, isHostname, isIPPort } from './validate'
+import { isCIDR, isHostname, isInterface, isIPPort } from './validate'
 
 const DYN_HELP: Record<DynAction, string> = {
   truncate: 'answer with TC=1 so real resolvers retry over TCP; spoofed-source floods cannot',
@@ -55,7 +57,7 @@ export function ConfigForm({
     part('listen', { [k]: { ...s.listen[k], ...p } } as Partial<Listen>)
   const errTabs = new Set(Object.keys(errors).map(tabOf))
 
-  const { do53, doh, dot, tls } = s.listen
+  const { do53, doh, dot, tls, tproxy: tp } = s.listen
   const { blocking: b, abuse: a, cgk: g, cache: c, analytics: an, dualstack: ds, speed_check: sc, dnssec: dn, ip_alias: ia, cname: cn } = s
 
   return (
@@ -103,6 +105,91 @@ export function ConfigForm({
             max={64}
             help="SO_REUSEPORT sockets per address; raise it on busy many-core nodes."
           />
+        </Section>
+        <Section
+          title="TProxy (transparent DNS redirect)"
+          description="For a node acting as a gateway or core router: intercept DNS queries that pass through it and answer them with dnsdist, without changing client settings. Client source addresses are preserved."
+          enabled={tp.enabled}
+          onEnabledChange={(enabled) => listen('tproxy', { enabled })}
+        >
+          <div className="grid max-w-md content-start gap-1.5">
+            <Label htmlFor="tproxy-mode">Mode</Label>
+            <Select
+              value={tp.mode || 'redirect'}
+              onValueChange={(mode) => listen('tproxy', { mode: mode as TProxyMode })}
+              disabled={ro}
+            >
+              <SelectTrigger id="tproxy-mode" className="w-full">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {TPROXY_MODES.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    {m === 'tproxy' ? 'tproxy (IP_TRANSPARENT relay)' : 'redirect (nftables REDIRECT)'}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {tp.mode === 'tproxy'
+                ? `Real TPROXY for policy-routed / FBF traffic. The agent relay listens on port ${tp.port || 5300} and preserves the original destination; dnsdist listens on 127.0.0.1:${(tp.port || 5300) + 1} with PROXY protocol.`
+                : 'Kernel REDIRECT into a dnsdist listener on the port below. Simpler, but the destination is rewritten before dnsdist. Use tproxy mode on core routers that use FBF or VRF policy routing.'}
+            </p>
+            <Errors path="listen.tproxy.mode" />
+          </div>
+          <Grid cols={3}>
+            <NumField
+              label="Redirect port"
+              path="listen.tproxy.port"
+              value={tp.port}
+              onChange={(port) => listen('tproxy', { port })}
+              min={0}
+              max={65535}
+              help={tp.mode === 'tproxy'
+                ? `Relay and nftables TPROXY port. 0 = 5300. dnsdist uses 127.0.0.1:${(tp.port || 5300) + 1}.`
+                : 'dnsdist listens on 0.0.0.0 and [::] at this port. 0 = 5300. It must not collide with another listener.'}
+            />
+          </Grid>
+          <Grid cols={2}>
+            <ListEditor
+              label="Client sources"
+              path="listen.tproxy.sources"
+              value={tp.sources}
+              onChange={(sources) => listen('tproxy', { sources })}
+              validate={isCIDR}
+              what="CIDR"
+              placeholder="10.0.0.0/8 192.168.0.0/16 100.64.0.0/10"
+              help="Only DNS from these client networks is intercepted; empty = every client. They are added to the dnsdist ACL automatically."
+            />
+            <ListEditor
+              label="Excluded destinations"
+              path="listen.tproxy.exclude_dst"
+              value={tp.exclude_dst}
+              onChange={(exclude_dst) => listen('tproxy', { exclude_dst })}
+              validate={isCIDR}
+              what="CIDR"
+              placeholder="8.8.8.8 2001:4860:4860::8888"
+              help="DNS destinations that must not be intercepted, e.g. a captive portal or a partner resolver. Empty = intercept every destination."
+            />
+          </Grid>
+          <ListEditor
+            label="Interfaces"
+            path="listen.tproxy.interfaces"
+            value={tp.interfaces}
+            onChange={(interfaces) => listen('tproxy', { interfaces })}
+            validate={isInterface}
+            what="interface"
+            placeholder="eth0 eth1.100"
+            help="Only traffic arriving on these interfaces is intercepted; empty = every interface."
+          />
+          {tp.mode === 'tproxy' && (
+            <SwitchField
+              label="Disable strict rp_filter"
+              help="FBF and VRF traffic often fails the reverse-path check. Turning this off is usually required for TPROXY on a core router; it weakens uRPF on this node."
+              checked={tp.disable_rp_filter}
+              onChange={(disable_rp_filter) => listen('tproxy', { disable_rp_filter })}
+            />
+          )}
         </Section>
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
           <Section
