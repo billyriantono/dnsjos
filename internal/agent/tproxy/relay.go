@@ -511,38 +511,8 @@ func listenTransparentPacket(ctx context.Context, network, address string, recvO
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		var serr error
 		if err := c.Control(func(fd uintptr) {
-			if network == "udp4" || network == "tcp4" {
-				if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1); err != nil {
-					serr = err
-					return
-				}
-				if recvOrigDst {
-					if err := unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_RECVORIGDSTADDR, 1); err != nil {
-						serr = err
-					}
-				}
-			} else {
-				if err := unix.SetsockoptInt(int(fd), unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1); err != nil {
-					serr = err
-					return
-				}
-				if recvOrigDst {
-					if err := unix.SetsockoptInt(int(fd), unix.SOL_IPV6, unix.IPV6_RECVORIGDSTADDR, 1); err != nil {
-						serr = err
-					}
-				}
-			}
-			if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1); err != nil {
+			if err := setTransparentUDP(fd, network, recvOrigDst); err != nil {
 				serr = err
-				return
-			}
-			// SO_REUSEPORT is only for the interception listeners. A reply socket binds
-			// the original destination (e.g. 8.8.8.8:53); setting REUSEPORT there would
-			// let it steal packets from another listener on the same address:port.
-			if recvOrigDst {
-				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1); err != nil {
-					serr = err
-				}
 			}
 		}); err != nil {
 			return err
@@ -561,23 +531,47 @@ func listenTransparentPacket(ctx context.Context, network, address string, recvO
 	return conn, nil
 }
 
+// setTransparentUDP applies the socket options every transparent UDP socket needs.
+//
+// SO_REUSEADDR is required for IP_TRANSPARENT to work at all. SO_REUSEPORT is required
+// on a reply socket because dnsdist commonly holds the wildcard 0.0.0.0:53 and
+// [::]:53 with SO_REUSEPORT; without it, binding the original destination (e.g.
+// 1.1.1.1:53) fails with EADDRINUSE and every answer would leave from the wrong source.
+// Joining the REUSEPORT group is safe here: the kernel picks a REUSEPORT group by exact
+// destination address, so a socket bound to 1.1.1.1:53 lives in its own group and never
+// competes with the wildcard group dnsdist owns.
+func setTransparentUDP(fd uintptr, network string, recvOrigDst bool) error {
+	opt, level := unix.IP_TRANSPARENT, unix.SOL_IP
+	if network == "udp6" || network == "tcp6" {
+		opt, level = unix.IPV6_TRANSPARENT, unix.SOL_IPV6
+	}
+	if err := unix.SetsockoptInt(int(fd), level, opt, 1); err != nil {
+		return err
+	}
+	if recvOrigDst {
+		recvOpt, recvLevel := unix.IP_RECVORIGDSTADDR, unix.SOL_IP
+		if network == "udp6" {
+			recvOpt, recvLevel = unix.IPV6_RECVORIGDSTADDR, unix.SOL_IPV6
+		}
+		if err := unix.SetsockoptInt(int(fd), recvLevel, recvOpt, 1); err != nil {
+			return err
+		}
+	}
+	for _, o := range []int{unix.SO_REUSEADDR, unix.SO_REUSEPORT} {
+		if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, o, 1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func listenTransparentStream(ctx context.Context, network, address string) (net.Listener, error) {
 	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
 		var serr error
 		if err := c.Control(func(fd uintptr) {
-			if network == "tcp4" {
-				serr = unix.SetsockoptInt(int(fd), unix.SOL_IP, unix.IP_TRANSPARENT, 1)
-			} else {
-				serr = unix.SetsockoptInt(int(fd), unix.SOL_IPV6, unix.IPV6_TRANSPARENT, 1)
+			if err := setTransparentUDP(fd, network, false); err != nil {
+				serr = err
 			}
-			if serr != nil {
-				return
-			}
-			serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
-			if serr != nil {
-				return
-			}
-			serr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEPORT, 1)
 		}); err != nil {
 			return err
 		}
