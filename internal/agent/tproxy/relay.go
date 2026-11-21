@@ -316,7 +316,7 @@ func (r *relay) replySocket(from netip.AddrPort) (*net.UDPConn, error) {
 		return c, nil
 	}
 	if c := r.listenerFor(from); c != nil {
-		r.cfg.Log.Debug("tproxy relay: transparent reply socket unavailable, answering from the listener",
+		r.cfg.Log.Warn("tproxy relay: transparent reply socket unavailable, answering from the listener",
 			"dest", from, "err", err)
 		return c, nil
 	}
