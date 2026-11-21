@@ -32,8 +32,9 @@ const (
 	UnitName      = "dnsjos-tproxy.service"
 	RelayUnitPath = "/etc/systemd/system/dnsjos-tproxy-relay.service"
 	RelayUnitName = "dnsjos-tproxy-relay.service"
-	// AgentBinary is the installed agent; the relay unit runs it as root so it can open
-	// IP_TRANSPARENT sockets.
+	// AgentBinary is the installed agent. The relay unit runs it as _dnsdist so its
+	// reply sockets share dnsdist's per-UID SO_REUSEPORT group and can bind the original
+	// destination address; ambient CAP_NET_ADMIN lets it open IP_TRANSPARENT sockets.
 	AgentBinary = "/usr/local/bin/dnsjos-agent"
 	// mark/table separate our policy routing from a core router's FBF rules.
 	tproxyMark  = "0x5315"
@@ -238,6 +239,7 @@ Group=_dnsdist
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 ExecStart=%s tproxy-relay --port %d --dnsdist 127.0.0.1:%d
+StartLimitIntervalSec=0
 Restart=always
 RestartSec=2
 LimitNOFILE=65536
@@ -262,7 +264,7 @@ func requiresRelay(tproxy bool) string {
 	if !tproxy {
 		return ""
 	}
-	return "Requires=" + RelayUnitName
+	return "BindsTo=" + RelayUnitName
 }
 
 // rpFilterScripts disables strict reverse-path filtering and remembers the previous
@@ -337,6 +339,7 @@ func Apply(ctx context.Context, root string, spec api.ConfigSpec, noSystemd bool
 	}
 	if spec.Listen.TProxy.IsTProxy() {
 		if changed || !activeUnit(ctx, RelayUnitName) {
+			_ = run(ctx, "systemctl", "reset-failed", RelayUnitName)
 			if err := run(ctx, "systemctl", "enable", RelayUnitName); err != nil {
 				return err
 			}
@@ -571,6 +574,7 @@ func RestartRelay(ctx context.Context, log *slog.Logger) {
 	if !activeUnit(ctx, RelayUnitName) {
 		return
 	}
+	_ = run(ctx, "systemctl", "reset-failed", RelayUnitName)
 	if err := run(ctx, "systemctl", "restart", RelayUnitName); err != nil {
 		log.Warn("restarting the TPROXY relay after the agent upgrade failed", "err", err)
 	}

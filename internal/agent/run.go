@@ -62,6 +62,7 @@ type agent struct {
 	mu         sync.Mutex
 	cfg        *api.AgentConfig // newest config received
 	seen       int              // its version (sent as ETag)
+	tpSpec     *api.ConfigSpec  // spec whose TProxy rules were last applied successfully
 	applied    int
 	applyErr   string
 	fetchErr   bool // applyErr came from a 409 on GET /config, not from applying
@@ -217,7 +218,7 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 	}
 	if cfg == nil { // 304: the panel serves the version we run again (e.g. a staged rollout pinned us back)
 		a.mu.Lock()
-		needTP, cur := a.tpPending, a.cfg
+		needTP, cur := a.tpPending, a.tpSpec
 		if a.fetchErr {
 			a.applyErr, a.fetchErr = "", false
 		}
@@ -226,14 +227,12 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 		// enabled so a relay or nft unit that died (or never started after an agent
 		// upgrade or boot) is brought back without waiting for a profile change. It
 		// costs a couple of systemctl checks per poll.
-		if cur != nil && (needTP || cur.Spec.Listen.TProxy.Enabled) {
-			if err := tproxy.Apply(ctx, a.o.Root, cur.Spec, a.o.NoSystemd, a.o.Log); err != nil {
+		if cur != nil && (needTP || cur.Listen.TProxy.Enabled) {
+			if err := tproxy.Apply(ctx, a.o.Root, *cur, a.o.NoSystemd, a.o.Log); err != nil {
 				a.o.Log.Warn("applying the DNS redirect rules failed", "err", err)
 				a.mu.Lock()
 				a.tpPending = true
-				if a.applyErr == "" || strings.HasPrefix(a.applyErr, "tproxy: ") {
-					a.applyErr = "tproxy: " + err.Error()
-				}
+				a.applyErr = "tproxy: " + err.Error()
 				a.mu.Unlock()
 			} else {
 				a.mu.Lock()
@@ -280,11 +279,13 @@ func (a *agent) pollConfig(ctx context.Context, force bool) {
 		return
 	}
 	if tpErr != nil {
-		a.applied, a.applyErr, a.fetchErr = cfg.Version, fmt.Sprintf("config v%d: tproxy: %v", cfg.Version, tpErr), false
+		a.applied, a.applyErr, a.fetchErr = cfg.Version, "tproxy: "+tpErr.Error(), false
 		a.tpPending = true
 		a.o.Log.Error("DNS redirect apply failed", "version", cfg.Version, "err", tpErr)
 		return
 	}
+	spec := cfg.Spec
+	a.tpSpec = &spec
 	a.applied, a.applyErr, a.fetchErr, a.tpPending = cfg.Version, "", false, false
 	if changed {
 		a.dnsdistVer = dnsdistVersion(ctx, a.run)
@@ -418,10 +419,10 @@ func (a *agent) collectHeartbeat(ctx context.Context) *api.Heartbeat {
 	hb.DnsdistCandidate, hb.DnsdistAvailable, hb.DnsdistRepoSeries = a.inv.Candidate, slices.Clone(a.inv.Available), a.inv.Series
 	hb.InventoryAt, hb.LastUpgrade, hb.UpgradeInProgress = a.inv.At, a.lastUp, a.upgrading
 	hb.AllowlistVersion = a.allowHave
-	spec := a.cfg
+	spec := a.tpSpec
 	a.mu.Unlock()
 	if spec != nil {
-		hb.TProxy = tproxy.Status(ctx, a.o.Root, spec.Spec, a.o.NoSystemd)
+		hb.TProxy = tproxy.Status(ctx, a.o.Root, *spec, a.o.NoSystemd)
 	}
 	return hb
 }

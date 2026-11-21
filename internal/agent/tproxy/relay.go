@@ -69,6 +69,7 @@ func RunRelay(ctx context.Context, cfg RelayConfig) error {
 		backends:   backends,
 		clientConn: make(map[netip.AddrPort]*clientSock),
 		done:       make(chan struct{}),
+		tcpSlots:   make(chan struct{}, 256),
 	}
 	defer r.close()
 
@@ -120,6 +121,7 @@ func RunRelay(ctx context.Context, cfg RelayConfig) error {
 	cfg.Log.Info("tproxy relay listening", "port", cfg.Port, "dnsdist", cfg.DNSDistAddr)
 	<-ctx.Done()
 	r.close()
+	r.tcpWG.Wait()
 	wg.Wait()
 	return nil
 }
@@ -162,6 +164,8 @@ type relay struct {
 	localAt    time.Time
 	closed     bool
 	done       chan struct{}
+	tcpWG      sync.WaitGroup
+	tcpSlots   chan struct{}
 }
 
 func (r *relay) close() {
@@ -390,6 +394,9 @@ func (r *relay) clientSocket(from netip.AddrPort) (*net.UDPConn, error) {
 func (r *relay) allocID(b *udpBackend) (uint16, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if len(b.pending) >= 65535 { // every non-zero id is in flight; do not scan under the lock
+		return 0, false
+	}
 	for i := 0; i < 65536; i++ {
 		b.nextID++
 		if _, used := b.pending[b.nextID]; !used && b.nextID != 0 {
@@ -407,10 +414,9 @@ func (r *relay) expire() {
 		case <-r.done:
 			return
 		case <-t.C:
-			// Longer than any dnsdist upstream timeout, so an answer to a slow
-			// upstream still finds its client. Memory stays trivial: ~60 bytes per
-			// entry, and 4 backends hold 262k ids.
-			cutoff := time.Now().Add(-30 * time.Second)
+			// dnsdist's UDP timeout is ~2s. A longer TTL lets dropped queries (dynblock,
+			// rate limits) exhaust the 16-bit id space in 30s and stall the relay.
+			cutoff := time.Now().Add(-5 * time.Second)
 			idle := time.Now().Add(-5 * time.Minute)
 			var stale []*net.UDPConn
 			r.mu.Lock()
@@ -458,12 +464,22 @@ func (r *relay) acceptTCP(ln net.Listener) {
 			r.cfg.Log.Debug("tproxy relay: tcp accept", "err", err)
 			continue
 		}
-		go r.handleTCP(c)
+		r.tcpWG.Add(1)
+		go func() {
+			defer r.tcpWG.Done()
+			defer c.Close()
+			r.handleTCP(c)
+		}()
 	}
 }
 
 func (r *relay) handleTCP(client net.Conn) {
-	defer client.Close()
+	select {
+	case r.tcpSlots <- struct{}{}:
+		defer func() { <-r.tcpSlots }()
+	default: // too many TCP connections; drop this one rather than exhaust goroutines
+		return
+	}
 	src := tcpAddrPort(client.RemoteAddr())
 	dst := tcpAddrPort(client.LocalAddr())
 	if !src.IsValid() || !dst.IsValid() || src.Addr().Is4() != dst.Addr().Is4() {
@@ -481,22 +497,22 @@ func (r *relay) handleTCP(client net.Conn) {
 	if _, err := backend.Write(proxyHeader(src, dst, true)); err != nil {
 		return
 	}
-	done := make(chan struct{}, 2)
+	// A client may half-close after its query. Forward independently, but return only
+	// when dnsdist answers or closes, so the reply still reaches the client.
+	var tcpWG sync.WaitGroup
+	tcpWG.Add(1)
 	go func() {
+		defer tcpWG.Done()
 		_, _ = io.Copy(backend, client)
 		if tc, ok := backend.(*net.TCPConn); ok {
 			_ = tc.CloseWrite()
 		}
-		done <- struct{}{}
 	}()
-	go func() {
-		_, _ = io.Copy(client, backend)
-		if tc, ok := client.(*net.TCPConn); ok {
-			_ = tc.CloseWrite()
-		}
-		done <- struct{}{}
-	}()
-	<-done
+	_, _ = io.Copy(client, backend)
+	if tc, ok := client.(*net.TCPConn); ok {
+		_ = tc.CloseWrite()
+	}
+	tcpWG.Wait()
 }
 
 func (r *relay) isClosed() bool {

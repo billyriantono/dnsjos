@@ -78,8 +78,8 @@ func TestRenderTProxyMode(t *testing.T) {
 		!strings.Contains(relay, "--dnsdist 127.0.0.1:5301") {
 		t.Errorf("relay unit incomplete:\n%s", relay)
 	}
-	if !strings.Contains(string(f.Unit), "Requires="+RelayUnitName) {
-		t.Errorf("nft unit must require the relay:\n%s", f.Unit)
+	if !strings.Contains(string(f.Unit), "BindsTo="+RelayUnitName) {
+		t.Errorf("nft unit must bind to the relay so it fails open:\n%s", f.Unit)
 	}
 }
 

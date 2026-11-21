@@ -60,10 +60,11 @@ var TProxyModes = []string{TProxyModeRedirect, TProxyModeTProxy}
 
 // TProxy makes the node intercept DNS queries that pass through it (a gateway/router)
 // and send them to dnsdist without touching client settings. dnsdist has no
-// IP_TRANSPARENT/TPROXY sockets and cannot bind a non-local destination, so the agent
-// installs an nftables REDIRECT into a dedicated dnsdist listener. REDIRECT keeps the
-// client source address, which is what dnsdist policies, abuse limits and analytics need.
-// It does not rewrite answers or touch traffic that is not DNS on port 53.
+// IP_TRANSPARENT/TPROXY sockets and cannot bind a non-local destination. In REDIRECT
+// mode the agent installs an nftables REDIRECT into a dedicated dnsdist listener; in
+// TPROXY mode an agent relay with IP_TRANSPARENT sockets preserves the original
+// destination and forwards to dnsdist over PROXY protocol. Neither mode rewrites answers
+// or touches traffic that is not DNS on port 53.
 type TProxy struct {
 	Enabled bool `json:"enabled"`
 	// Mode selects the interception mechanism:
@@ -79,8 +80,9 @@ type TProxy struct {
 	// added to the dnsdist ACL automatically: a redirected client that the ACL refuses
 	// would get no answer at all.
 	Sources []string `json:"sources"`
-	// ExcludeDst are destination CIDRs never intercepted (upstream servers are always
-	// excluded automatically, so dnsdist's own recursive traffic cannot loop back).
+	// ExcludeDst are destination CIDRs never intercepted. In REDIRECT mode dnsdist's own
+	// upstreams are excluded automatically; TPROXY mode needs explicit exclusions if a
+	// recursive resolver behind this node must not be intercepted.
 	ExcludeDst []string `json:"exclude_dst"`
 	// Interfaces limits interception to traffic arriving on these interfaces
 	// (empty = every interface).
