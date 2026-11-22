@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -153,6 +154,35 @@ func TestBuildFlow(t *testing.T) {
 	exec(t, pool, `INSERT INTO blocklist_sources (name, kind, content) VALUES ('wl', 'whitelist', 'b.com')`)
 	if b := build("ok"); b.Domains != 2 || b.Whitelisted != 1 || blocked("x.b.com") || !blocked("c.com") {
 		t.Fatalf("whitelist build: %+v", b)
+	}
+
+	// A whitelist from a URL: fetched like any URL source and its domains removed from
+	// the CDB, same as a manual whitelist. It initially whitelists b.com (dropping the
+	// blocklist to exactly the floor), so a.com stays blocked and b.com stops.
+	wlURL := &fakeList{etag: `"w1"`, body: "b.com\n"}
+	mux.Handle("/wl", wlURL)
+	exec(t, pool, fmt.Sprintf(
+		`INSERT INTO blocklist_sources (name, kind, url) VALUES ('wlurl', 'whitelist_url', '%s')`, up.URL+"/wl"))
+	if b := build("ok"); blocked("x.b.com") || !blocked("a.com") || !blocked("c.com") {
+		t.Fatalf("whitelist_url build: %+v", b)
+	}
+	// The URL drives the whitelist: switching it to a.com unblocks a.com. With b.com
+	// already whitelisted manually that leaves one domain, so lower the floor briefly.
+	minDomains = 1
+	wlURL.set(`"w2"`, "a.com\n")
+	if b := build("ok"); blocked("x.a.com") || blocked("x.b.com") || !blocked("c.com") {
+		t.Fatalf("whitelist_url refresh did not follow the URL: %+v", b)
+	}
+	// Same body again: nothing changed, so the build is skipped.
+	if b := build("skipped"); b.Error != "" {
+		t.Fatalf("identical whitelist_url should skip: %+v", b)
+	}
+	minDomains = 2
+	// Point the URL at an absent domain: a.com is blocked again and the later
+	// manual_domains / lookup assertions see the original two trustpositif entries.
+	wlURL.set(`"w3"`, "outside.test\n")
+	if b := build("ok"); !blocked("x.a.com") || blocked("x.b.com") || !blocked("c.com") {
+		t.Fatalf("whitelist_url removal: %+v", b)
 	}
 
 	minDomains = 10 // sanity floor: failed, previous build stays current
@@ -309,7 +339,7 @@ func testAPI(t *testing.T, d *app.Deps, s *Service) {
 	}
 	var list api.List[api.BlocklistSource]
 	call("GET", "/api/v1/blocklist/sources", "", 200, &list)
-	if list.Total != 5 {
+	if list.Total != 6 {
 		t.Fatalf("sources total %d", list.Total)
 	}
 	call("DELETE", "/api/v1/blocklist/sources/"+src.ID, "", 204, nil)

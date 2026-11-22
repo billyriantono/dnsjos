@@ -66,10 +66,14 @@ type source struct {
 }
 
 func isURLKind(k string) bool {
-	return strings.HasPrefix(k, "trustpositif_") || strings.HasPrefix(k, "url_")
+	return strings.HasPrefix(k, "trustpositif_") || strings.HasPrefix(k, "url_") || k == "whitelist_url"
 }
-func isDomainKind(k string) bool { return strings.HasSuffix(k, "_domains") }
-func isIPKind(k string) bool     { return strings.HasSuffix(k, "_ips") }
+
+// isWhitelistKind reports whether a source contributes whitelist domains. Both the
+// manual paste ("whitelist") and the fetched "whitelist_url" do.
+func isWhitelistKind(k string) bool { return k == "whitelist" || k == "whitelist_url" }
+func isDomainKind(k string) bool    { return strings.HasSuffix(k, "_domains") }
+func isIPKind(k string) bool        { return strings.HasSuffix(k, "_ips") }
 
 const buildCols = `b.id, coalesce(b.profile_id::text, ''), coalesce(p.name, ''), b.started_at, b.finished_at, b.status, b.trigger, b.domains, b.ips, b.whitelisted, b.skipped, b.size_bytes, b.sha256, b.error, b.added, b.removed`
 
@@ -302,8 +306,22 @@ func (s *Service) build(ctx context.Context, profileID string, force bool) (res 
 	trustPositif := false
 	for _, src := range srcs {
 		switch {
-		case src.Kind == "whitelist":
-			for line := range strings.Lines(src.Content) {
+		case isWhitelistKind(src.Kind):
+			// A manual whitelist reads its pasted content; a fetched whitelist URL is
+			// downloaded to sourcePath like any URL source and read from there.
+			if src.Kind == "whitelist" {
+				for line := range strings.Lines(src.Content) {
+					if n, ok := normalizeDomain(stripLine(line)); ok {
+						wl[n] = struct{}{}
+					}
+				}
+				continue
+			}
+			wlData, err := os.ReadFile(s.sourcePath(src.ID))
+			if err != nil {
+				continue // never fetched successfully; last_status says why
+			}
+			for line := range strings.Lines(string(wlData)) {
 				if n, ok := normalizeDomain(stripLine(line)); ok {
 					wl[n] = struct{}{}
 				}

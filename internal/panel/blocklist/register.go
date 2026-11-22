@@ -68,7 +68,7 @@ func scanSource(row pgx.Row) (api.BlocklistSource, error) {
 }
 
 var kinds = []string{"trustpositif_domains", "trustpositif_ips", "url_domains", "url_ips",
-	"manual_domains", "manual_ips", "whitelist"}
+	"manual_domains", "manual_ips", "whitelist", "whitelist_url"}
 
 func validURL(s string) bool {
 	u, err := url.Parse(s)

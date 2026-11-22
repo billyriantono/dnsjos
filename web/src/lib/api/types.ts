@@ -644,6 +644,7 @@ export type BlocklistSourceKind =
   | 'manual_domains'
   | 'manual_ips'
   | 'whitelist'
+  | 'whitelist_url'
 
 export interface BlocklistSource {
   id: string
