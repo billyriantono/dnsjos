@@ -49,6 +49,7 @@ const KINDS: Record<BlocklistSourceKind, string> = {
   manual_domains: 'Manual domains',
   manual_ips: 'Manual IPs',
   whitelist: 'Whitelist',
+  whitelist_url: 'Whitelist — URL',
 }
 const isManual = (k: BlocklistSourceKind) => k === 'manual_domains' || k === 'manual_ips' || k === 'whitelist'
 
